@@ -1,0 +1,99 @@
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     Android AndroidManifest.xml additions for MoveOut Shield Landlord
+     ═══════════════════════════════════════════════════════════════════════════
+
+     Add the intent-filter blocks below INSIDE the existing <activity> element
+     for MainActivity (android/app/src/main/AndroidManifest.xml).
+
+     These declarations tell Android:
+       1. This app can handle VIEW intents for .mosinsp files
+       2. Match files with the .mosinsp extension regardless of MIME type,
+          from any source: file://, content:// (Gmail/Drive), downloads, etc.
+
+     Three intent-filters are needed because Android's extension matching is
+     frustratingly partial — you need separate filters for:
+       - Files with an explicit MIME type (application/octet-stream)
+       - Files identified only by extension via content://
+       - Files from file:// URIs (local storage, older sharing paths)
+     ═══════════════════════════════════════════════════════════════════════════ -->
+
+<!-- Paste INSIDE the <activity android:name=".MainActivity" ...> element,
+     after the existing <intent-filter> blocks. -->
+
+<!-- Filter 1: files with known MIME type (most modern share sheets) -->
+<intent-filter android:label="MoveOut Shield Inspection">
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="content" />
+    <data android:scheme="file" />
+    <data android:mimeType="application/octet-stream" />
+    <data android:mimeType="application/vnd.moveoutshield.inspection" />
+    <data android:host="*" />
+    <data android:pathPattern=".*\\.mosinsp" />
+    <data android:pathPattern=".*\\..*\\.mosinsp" />
+    <data android:pathPattern=".*\\..*\\..*\\.mosinsp" />
+    <data android:pathPattern=".*\\..*\\..*\\..*\\.mosinsp" />
+</intent-filter>
+
+<!-- Filter 2: files where MIME type is missing (Gmail attachments, some cloud providers) -->
+<intent-filter android:label="MoveOut Shield Inspection">
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="content" />
+    <data android:scheme="file" />
+    <data android:host="*" />
+    <data android:mimeType="*/*" />
+    <data android:pathPattern=".*\\.mosinsp" />
+    <data android:pathPattern=".*\\..*\\.mosinsp" />
+    <data android:pathPattern=".*\\..*\\..*\\.mosinsp" />
+    <data android:pathPattern=".*\\..*\\..*\\..*\\.mosinsp" />
+</intent-filter>
+
+<!-- Filter 3: generic fallback for SEND intents (share → this app) -->
+<intent-filter android:label="Open in MoveOut Shield Landlord">
+    <action android:name="android.intent.action.SEND" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="application/octet-stream" />
+    <data android:mimeType="application/vnd.moveoutshield.inspection" />
+</intent-filter>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     Why the multiple pathPattern entries?
+
+     Android's pathPattern matching is literal, not glob. ".*\\.mosinsp" only
+     matches paths with zero dots before the extension. Each additional
+     ".*\\." prefix handles one more dot in the path. Four variants covers
+     filenames like:
+         inspection.mosinsp
+         backup.inspection.mosinsp
+         2026.04.24.inspection.mosinsp
+         my.backup.2026.inspection.mosinsp
+
+     This is the documented workaround — see Android's own docs on data
+     element matching. It's ugly but it's correct.
+     ═══════════════════════════════════════════════════════════════════════════ -->
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     NOTE: FileProvider paths
+     ═══════════════════════════════════════════════════════════════════════════
+
+     Your existing FileProvider configuration in AndroidManifest.xml (inherited
+     from Capacitor) and res/xml/file_paths.xml should already cover the
+     landlord app's needs — cache-path, files-path, and external-path are
+     enough for Filesystem.readFile() to handle content:// URIs from Gmail,
+     Drive, Dropbox, etc.
+
+     If you run into issues reading content:// URIs during import (rare,
+     usually on older Android versions), add these to file_paths.xml:
+
+         <root-path name="root" path="." />
+         <external-files-path name="external-files" path="." />
+
+     But do NOT add these reflexively — root-path is overly permissive and
+     Google Play's review team flags it. Only add if the default paths fail
+     on real-device testing.
+     ═══════════════════════════════════════════════════════════════════════════ -->

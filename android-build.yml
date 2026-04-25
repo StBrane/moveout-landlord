@@ -1,0 +1,120 @@
+# Codemagic Android build workflow — MoveOut Shield Landlord
+# ───────────────────────────────────────────────────────────────────────────
+# Mirrors the tenant app's android-build.yml with two changes:
+#   1. applicationId is com.moveoutshield.landlord
+#   2. Patches AndroidManifest.xml to add the .mosinsp intent-filters
+#
+# The intent-filter patching uses sed — keep the manifest template source
+# of truth in android-config/AndroidManifest.intent-filter.xml and this
+# script injects it before the closing </activity> tag of MainActivity.
+# ───────────────────────────────────────────────────────────────────────────
+
+workflows:
+  android-landlord:
+    name: Android — MoveOut Shield Landlord
+    instance_type: linux_x2
+    max_build_duration: 60
+    environment:
+      vars:
+        PACKAGE_NAME: "com.moveoutshield.landlord"
+      android_signing:
+        - moveout_shield_landlord_keystore
+      node: 20
+      java: 17
+
+    scripts:
+      - name: Install npm dependencies
+        script: npm ci
+
+      - name: Install native Capacitor plugins
+        script: |
+          npm install @capacitor/core @capacitor/cli @capacitor/android \
+                      @capacitor/app @capacitor/filesystem \
+                      @capacitor/share @capacitor/splash-screen \
+                      @capacitor/camera @capacitor/geolocation
+
+      - name: Build web assets
+        script: npm run build
+
+      - name: Capacitor Android sync
+        script: |
+          npx cap add android || true
+          npx cap sync android
+
+      # ─── Inject intent-filters into AndroidManifest.xml ────────────────
+      - name: Patch AndroidManifest.xml with .mosinsp intent-filters
+        script: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+
+          # Build the intent-filter XML we want to inject. Keep this in sync
+          # with android-config/AndroidManifest.intent-filter.xml — if you
+          # update one, update the other.
+          INTENT_FILTERS='
+                  <intent-filter android:label="MoveOut Shield Inspection">
+                      <action android:name="android.intent.action.VIEW" />
+                      <category android:name="android.intent.category.DEFAULT" />
+                      <category android:name="android.intent.category.BROWSABLE" />
+                      <data android:scheme="content" />
+                      <data android:scheme="file" />
+                      <data android:mimeType="application/octet-stream" />
+                      <data android:mimeType="application/vnd.moveoutshield.inspection" />
+                      <data android:host="*" />
+                      <data android:pathPattern=".*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\..*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\..*\\\\..*\\\\.mosinsp" />
+                  </intent-filter>
+                  <intent-filter android:label="MoveOut Shield Inspection">
+                      <action android:name="android.intent.action.VIEW" />
+                      <category android:name="android.intent.category.DEFAULT" />
+                      <category android:name="android.intent.category.BROWSABLE" />
+                      <data android:scheme="content" />
+                      <data android:scheme="file" />
+                      <data android:host="*" />
+                      <data android:mimeType="*/*" />
+                      <data android:pathPattern=".*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\..*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\..*\\\\..*\\\\.mosinsp" />
+                  </intent-filter>'
+
+          # Inject before the closing </activity> tag (first occurrence, the
+          # MainActivity one)
+          python3 << EOF
+          import re
+          with open("$MANIFEST", "r") as f:
+              content = f.read()
+          injected = """$INTENT_FILTERS"""
+          # Insert before the first </activity> closing tag
+          new_content = re.sub(r'</activity>', injected + '\n        </activity>', content, count=1)
+          with open("$MANIFEST", "w") as f:
+              f.write(new_content)
+          print("Manifest patched:")
+          print(new_content)
+          EOF
+
+      # ─── Build signed release APK + AAB ───────────────────────────────
+      - name: Set build number
+        script: |
+          cd android
+          sed -i "s/versionCode .*/versionCode $BUILD_NUMBER/" app/build.gradle
+
+      - name: Build AAB
+        script: |
+          cd android
+          ./gradlew :app:bundleRelease
+
+      - name: Build APK (for sideload testing)
+        script: |
+          cd android
+          ./gradlew :app:assembleRelease
+
+    artifacts:
+      - android/app/build/outputs/**/*.aab
+      - android/app/build/outputs/**/*.apk
+
+    publishing:
+      google_play:
+        credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
+        track: internal
+        submit_as_draft: true

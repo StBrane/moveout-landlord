@@ -1,0 +1,101 @@
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     iOS Info.plist additions for MoveOut Shield Landlord
+     ═══════════════════════════════════════════════════════════════════════════
+
+     Add the two top-level keys below to your app's Info.plist
+     (ios/App/App/Info.plist).
+
+     These declarations tell iOS:
+       1. "com.moveoutshield.inspection" is a file type this app understands
+          (UTExportedTypeDeclarations)
+       2. This app can open files of that type — show it in share sheets, Mail
+          attachments, AirDrop, and the Files app "Open In…" menu
+          (CFBundleDocumentTypes)
+
+     Without BOTH of these, iOS won't route .mosinsp files to the landlord app.
+
+     Patching in CI: this can be applied via PlistBuddy the same way the tenant
+     app patches permission strings. See the ios-build.yml snippet below.
+     ═══════════════════════════════════════════════════════════════════════════ -->
+
+    <!-- Declare the custom UTI for .mosinsp bundles -->
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.moveoutshield.inspection</string>
+            <key>UTTypeDescription</key>
+            <string>MoveOut Shield Inspection Bundle</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+                <string>public.content</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>mosinsp</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>application/vnd.moveoutshield.inspection</string>
+                    <string>application/octet-stream</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+
+    <!-- Register this app as a handler for those files -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>MoveOut Shield Inspection Bundle</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.moveoutshield.inspection</string>
+            </array>
+        </dict>
+    </array>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     Codemagic / GitHub Actions patch snippet (PlistBuddy)
+     ═══════════════════════════════════════════════════════════════════════════
+
+     If you patch Info.plist in CI rather than committing it, here's the
+     PlistBuddy sequence. Add to your ios-build.yml after npm/cap sync:
+
+       PLIST="ios/App/App/Info.plist"
+
+       # --- UTExportedTypeDeclarations ---
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations array" $PLIST || true
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0 dict" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeIdentifier string com.moveoutshield.inspection" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeDescription string 'MoveOut Shield Inspection Bundle'" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo array" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:0 string public.data" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:1 string public.content" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification dict" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension array" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0 string mosinsp" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.mime-type array" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.mime-type:0 string application/vnd.moveoutshield.inspection" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.mime-type:1 string application/octet-stream" $PLIST
+
+       # --- CFBundleDocumentTypes ---
+       /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes array" $PLIST || true
+       /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0 dict" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeName string 'MoveOut Shield Inspection Bundle'" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSHandlerRank string Owner" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Viewer" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes array" $PLIST
+       /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string com.moveoutshield.inspection" $PLIST
+
+     After adding the UTI, iOS's Files app, Mail attachments, AirDrop, and
+     share sheets will all route .mosinsp files to the landlord app.
+     ═══════════════════════════════════════════════════════════════════════════ -->

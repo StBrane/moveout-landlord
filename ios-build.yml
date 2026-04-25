@@ -1,0 +1,122 @@
+# Codemagic iOS build workflow — MoveOut Shield Landlord
+# ───────────────────────────────────────────────────────────────────────────
+# Mirrors the tenant app's ios-build.yml with two key changes:
+#   1. Bundle ID is com.moveoutshield.landlord (not the tenant bundle ID)
+#   2. Patches Info.plist to register the .mosinsp UTI (ios-config file)
+# ───────────────────────────────────────────────────────────────────────────
+
+workflows:
+  ios-landlord:
+    name: iOS — MoveOut Shield Landlord
+    instance_type: mac_mini_m1
+    max_build_duration: 60
+    environment:
+      vars:
+        XCODE_WORKSPACE: "ios/App/App.xcworkspace"
+        XCODE_SCHEME: "App"
+        BUNDLE_ID: "com.moveoutshield.landlord"
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.moveoutshield.landlord
+      node: 20
+      xcode: latest
+      cocoapods: default
+
+    scripts:
+      # ─── 1. Install & build web ────────────────────────────────────────
+      - name: Install npm dependencies
+        script: npm ci
+
+      - name: Install native Capacitor plugins
+        script: |
+          # Install the Capacitor plugins the landlord app uses. These
+          # mirror the tenant app's dep set — keep in sync.
+          npm install @capacitor/core @capacitor/cli \
+                      @capacitor/app @capacitor/filesystem \
+                      @capacitor/share @capacitor/splash-screen \
+                      @capacitor/camera @capacitor/geolocation
+
+      - name: Build web assets
+        script: npm run build
+
+      - name: Capacitor iOS sync
+        script: |
+          npx cap add ios || true
+          npx cap sync ios
+
+      # ─── 2. Patch Info.plist with UTI + permissions ────────────────────
+      - name: Patch Info.plist with UTI declarations
+        script: |
+          PLIST="ios/App/App/Info.plist"
+
+          # Camera & location usage strings (required by App Store review)
+          /usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription 'MoveOut Shield Landlord uses the camera to document property condition with photos.'" $PLIST || \
+            /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'MoveOut Shield Landlord uses the camera to document property condition with photos.'" $PLIST
+
+          /usr/libexec/PlistBuddy -c "Set :NSPhotoLibraryUsageDescription 'MoveOut Shield Landlord saves inspection photos to your photo library for safekeeping.'" $PLIST || \
+            /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryUsageDescription string 'MoveOut Shield Landlord saves inspection photos to your photo library for safekeeping.'" $PLIST
+
+          /usr/libexec/PlistBuddy -c "Set :NSPhotoLibraryAddUsageDescription 'MoveOut Shield Landlord saves inspection photos to your photo library for safekeeping.'" $PLIST || \
+            /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryAddUsageDescription string 'MoveOut Shield Landlord saves inspection photos to your photo library for safekeeping.'" $PLIST
+
+          /usr/libexec/PlistBuddy -c "Set :NSLocationWhenInUseUsageDescription 'MoveOut Shield Landlord tags inspection photos with GPS location to strengthen evidence for deposit disputes.'" $PLIST || \
+            /usr/libexec/PlistBuddy -c "Add :NSLocationWhenInUseUsageDescription string 'MoveOut Shield Landlord tags inspection photos with GPS location to strengthen evidence for deposit disputes.'" $PLIST
+
+          # ─── UTI: com.moveoutshield.inspection ─────────────────────────
+          /usr/libexec/PlistBuddy -c "Delete :UTExportedTypeDeclarations" $PLIST 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations array" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0 dict" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeIdentifier string com.moveoutshield.inspection" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeDescription string 'MoveOut Shield Inspection Bundle'" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo array" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:0 string public.data" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:1 string public.content" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification dict" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension array" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0 string mosinsp" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.mime-type array" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.mime-type:0 string application/vnd.moveoutshield.inspection" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.mime-type:1 string application/octet-stream" $PLIST
+
+          # ─── Register as handler for the UTI ───────────────────────────
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleDocumentTypes" $PLIST 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes array" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0 dict" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeName string 'MoveOut Shield Inspection Bundle'" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSHandlerRank string Owner" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Viewer" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes array" $PLIST
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string com.moveoutshield.inspection" $PLIST
+
+          echo "Info.plist patched. Final contents:"
+          cat $PLIST
+
+      # ─── 3. Sign & archive ─────────────────────────────────────────────
+      - name: Install pods
+        script: cd ios/App && pod install
+
+      - name: Fetch signing
+        script: |
+          xcode-project use-profiles
+
+      - name: Set build number
+        script: |
+          cd ios/App
+          agvtool new-version -all $(($BUILD_NUMBER + 1))
+
+      - name: Build ipa
+        script: |
+          xcode-project build-ipa \
+            --workspace "$XCODE_WORKSPACE" \
+            --scheme "$XCODE_SCHEME"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        beta_groups:
+          - Landlord Internal Testers
