@@ -42,11 +42,13 @@ import {
 } from './lib/bundleImport.js';
 import { makePhotoStore } from './lib/photoStore.js';
 import { buildComparisonPDF } from './lib/comparisonPDF.js';
+import { buildTenancyFindingsPDF } from './lib/tenancyFindingsPDF.js';
 
 import PortfolioScreen from './screens/PortfolioScreen.jsx';
 import PropertyScreen from './screens/PropertyScreen.jsx';
 import ChangesScreen from './screens/ChangesScreen.jsx';
 import CaptureScreen from './screens/CaptureScreen.jsx';
+import TenancyFindingsScreen from './screens/TenancyFindingsScreen.jsx';
 import ImportProgressModal from './components/ImportProgressModal.jsx';
 
 const IS_NATIVE = Capacitor.isNativePlatform();
@@ -64,6 +66,9 @@ function parseRoute(hash) {
   if (parts[0] === 'compare' && parts[1] && parts[2] && parts[3]) {
     const ids = [parts[2], parts[3], parts[4]].filter(Boolean);
     return { name: 'compare', propertyId: parts[1], inspectionIds: ids };
+  }
+  if (parts[0] === 'findings' && parts[1] && parts[2]) {
+    return { name: 'findings', propertyId: parts[1], tenancyId: parts[2] };
   }
   return { name: 'portfolio' };
 }
@@ -505,6 +510,52 @@ function App() {
     }
   }, [photoStore]);
 
+  // ─── Tenancy Findings PDF share — mirrors comparison PDF flow ────────
+  const handleShareFindingsPDF = useCallback(async ({ report, property, tenancy }) => {
+    if (!report || report.summary.itemCount === 0) {
+      alert('No findings to share — records show no items changed during this tenancy.');
+      return;
+    }
+    try {
+      const doc = await buildTenancyFindingsPDF(report, property, tenancy, photoStore);
+      const safeName = (property?.name || 'Property').replace(/\s+/g, '-').replace(/[^A-Za-z0-9-_]/g, '');
+      const date = new Date().toISOString().slice(0, 10);
+      const fileName = `${safeName}-Findings-${date}.pdf`;
+
+      if (IS_NATIVE) {
+        const dataUri = doc.output('datauristring');
+        const base64 = dataUri.split(',')[1];
+        await Filesystem.writeFile({
+          path: fileName,
+          data: base64,
+          directory: Directory.Cache,
+          recursive: true,
+        });
+        const { uri } = await Filesystem.getUri({
+          path: fileName,
+          directory: Directory.Cache,
+        });
+        try {
+          await Share.share({
+            title: `Findings — ${property?.name || 'Property'}`,
+            text: `Tenancy Findings report for ${property?.name || 'this property'}`,
+            url: uri,
+            dialogTitle: 'Share Tenancy Findings',
+          });
+        } catch (e) {
+          const msg = String(e?.message || '');
+          if (!msg.includes('cancel') && !msg.includes('abort') && !msg.includes('dismiss')) throw e;
+        }
+      } else {
+        doc.save(fileName);
+      }
+    } catch (e) {
+      console.error('Findings PDF export failed:', e);
+      alert('Findings PDF export failed: ' + (e?.message || 'unknown error'));
+      throw e;
+    }
+  }, [photoStore]);
+
   // ─── Render ─────────────────────────────────────────────────────────
   return (
     <div style={{ background: THEME.bg, color: THEME.ink, minHeight: '100vh' }}>
@@ -524,6 +575,7 @@ function App() {
           onCompare={(ids) => navigate(`/compare/${route.propertyId}/${ids.join('/')}`)}
           onCapture={(inspectionId) => navigate(`/capture/${route.propertyId}/${inspectionId}`)}
           onImportTenantReport={triggerFilePicker}
+          onTenancyFindings={(tenancyId) => navigate(`/findings/${route.propertyId}/${tenancyId}`)}
           photoStore={photoStore}
         />
       )}
@@ -544,6 +596,16 @@ function App() {
           inspectionIds={route.inspectionIds}
           onBack={() => navigate(`/property/${route.propertyId}`)}
           onSharePDF={handleShareComparisonPDF}
+          photoStore={photoStore}
+        />
+      )}
+      {route.name === 'findings' && (
+        <TenancyFindingsScreen
+          portfolio={portfolio}
+          propertyId={route.propertyId}
+          tenancyId={route.tenancyId}
+          onBack={() => navigate(`/property/${route.propertyId}`)}
+          onSharePDF={handleShareFindingsPDF}
           photoStore={photoStore}
         />
       )}

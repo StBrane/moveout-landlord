@@ -246,7 +246,7 @@ jobs:
             DEVELOPMENT_TEAM=8Z7U5ZLH9J \
             OTHER_CODE_SIGN_FLAGS="--keychain build.keychain" \
             CURRENT_PROJECT_VERSION=${{ github.run_number }} \
-            MARKETING_VERSION=0.3.9 \
+            MARKETING_VERSION=0.4.0 \
             archive
 
           xcodebuild -exportArchive \

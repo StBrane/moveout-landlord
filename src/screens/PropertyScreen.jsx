@@ -42,7 +42,7 @@ const IS_NATIVE = Capacitor.isNativePlatform();
 
 export default function PropertyScreen({
   portfolio, setPortfolio, propertyId,
-  onBack, onCompare, onCapture, onImportTenantReport,
+  onBack, onCompare, onCapture, onImportTenantReport, onTenancyFindings,
   photoStore,
 }) {
   const property = getProperty(portfolio, propertyId);
@@ -386,6 +386,7 @@ export default function PropertyScreen({
               onOpenInspection={onCapture}
               onCreateInspection={(typeId) => handleNewInspection(typeId, tenancy.id)}
               onImportTenantReport={() => onImportTenantReport({ tenancyId: tenancy.id, propertyId })}
+              onTenancyFindings={onTenancyFindings ? () => onTenancyFindings(tenancy.id) : null}
               selected={selected}
               onToggleSelect={toggleSelect}
             />
@@ -526,7 +527,7 @@ export default function PropertyScreen({
 function TenancySection({
   tenancy, property, isActive, isCollapsed,
   onToggleCollapsed, onDeleteTenancy, onEditTenancy,
-  onDeleteInspection, onOpenInspection, onCreateInspection, onImportTenantReport,
+  onDeleteInspection, onOpenInspection, onCreateInspection, onImportTenantReport, onTenancyFindings,
   selected, onToggleSelect,
 }) {
   const tenantNames = tenancy.tenants?.length > 0 ? tenancy.tenants.join(', ') : '(unnamed tenant)';
@@ -787,6 +788,32 @@ function TenancySection({
               ))}
             </div>
           )}
+
+          {(() => {
+            // Show Tenancy Findings button only when the lease has enough records
+            // to find changes between. Need at least 2 canonical records.
+            if (!onTenancyFindings) return null;
+            const canonicalKinds = new Set(['baseline', 'tenant_move_in', 'post_tenant', 'tenant_move_out']);
+            const canonicalCount = (tenancy.inspections || [])
+              .filter(i => canonicalKinds.has(i.type)).length;
+            if (canonicalCount < 2) return null;
+            return (
+              <button
+                onClick={onTenancyFindings}
+                style={{
+                  background: THEME.brand, color: THEME.mint300,
+                  border: `1px solid ${THEME.brand}`, borderRadius: 12,
+                  padding: '12px 16px', fontSize: 13, fontWeight: 700,
+                  cursor: 'pointer', width: '100%',
+                  marginTop: 12,
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                }}
+              >
+                <span style={{ fontSize: 15 }}>📊</span>
+                <span>View Tenancy Findings</span>
+              </button>
+            );
+          })()}
 
           <button onClick={onDeleteTenancy} style={{
             background: 'transparent', color: THEME.danger,
