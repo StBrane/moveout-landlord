@@ -5,9 +5,8 @@ export default defineConfig({
   plugins: [react()],
   build: {
     outDir: 'dist',
-    assetsInlineLimit: 0,
-  },
-  server: {
-    port: 5174, // different from tenant's 5173 so both can dev concurrently
+    // Inline assets under 100kb — keeps the app self-contained for Capacitor.
+    // Without this, Capacitor's webview hits broken asset URLs at runtime.
+    assetsInlineLimit: 100000,
   },
 });

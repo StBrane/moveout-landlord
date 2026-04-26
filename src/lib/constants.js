@@ -1,17 +1,16 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // constants.js — shared data tables for the landlord app
 // ═══════════════════════════════════════════════════════════════════════════
-// These mirror the tenant app's ROOMS and STATE_LAWS exactly. Keep them in
-// sync when the tenant app adds rooms/items/states. Schema changes require
-// a BUNDLE_SCHEMA version bump.
+// ROOMS, STATE_LAWS mirror the tenant app exactly. Keep in sync — schema
+// changes require a BUNDLE_SCHEMA version bump.
 //
-// INSPECTION_TYPES is landlord-specific — tenant app only has one type
-// (tenant-recorded with a move-in and move-out phase).
+// INSPECTION_TYPES is landlord-specific. Each type has a `defaultSlot` field
+// that determines whether captured data lands in the moveIn or moveOut slot
+// of the inspection record. This mapping is what lets the diff engine compare
+// landlord baselines against tenant move-outs apples-to-apples.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ─── STATE DEPOSIT LAWS ─────────────────────────────────────────────────────
-// Row shape: [name, abbr, daysToReturn, penalty, notes]
-// Index into this array is the `stateIdx` stored on inspections.
 export const STATE_LAWS = [
   ["Alabama","AL",60,"2× deposit","Written itemization required"],
   ["Alaska","AK","14–30","2× + damages","14 days if no deductions; 30 days with deductions"],
@@ -65,9 +64,7 @@ export const STATE_LAWS = [
   ["Wyoming","WY",30,"None specified","No statutory penalty — rely on small claims"],
 ];
 
-// ─── ROOMS ──────────────────────────────────────────────────────────────────
-// Identical to tenant app. Change in lockstep — schema version bump required
-// if structure changes.
+// ─── ROOMS (identical to tenant app) ────────────────────────────────────────
 export const ROOMS = [
   { id:"entry",   name:"Entry & Hallway",  icon:"🚪", items:["Front door, locks & deadbolt","Weatherstripping & door seal","Light fixtures & switches","Walls — paint, scuffs, holes","Flooring / tile","Entryway closet (door, rod, shelves)","Smoke / CO detector"] },
   { id:"living",  name:"Living Room",      icon:"🛋️", items:["Walls — holes, scuffs, stains","Ceiling — cracks, water stains","Carpet or flooring","Windows, locks & screens","Blinds / window coverings","Light fixtures & ceiling fan","Outlets & switches","Baseboards & trim","Fireplace (if present)"] },
@@ -82,10 +79,7 @@ export const ROOMS = [
   { id:"outdoor", name:"Outdoor / Patio",  icon:"🌿", items:["Patio or deck condition","Fencing & gates","Yard, lawn & landscaping","Exterior lights","Hose bibs / spigots","Storage areas"] },
 ];
 
-// ─── STATUS ────────────────────────────────────────────────────────────────
-// Status codes used in rooms[roomId][phase].statuses[itemIdx].
-// Tenant app uses: clean, fair, damaged, na.
-// Landlord app uses the same codes so imported bundles render correctly.
+// ─── STATUS (mirrors tenant app exactly) ────────────────────────────────────
 export const STATUS = {
   clean:   { label:"✦ Clean",   short:"CLEAN",  bg:"#DBEAFE", fg:"#1E40AF", ring:"#93C5FD" },
   fair:    { label:"✓ Fair",    short:"FAIR",   bg:"#D1FAE5", fg:"#065F46", ring:"#6EE7B7" },
@@ -93,58 +87,75 @@ export const STATUS = {
   na:      { label:"— N/A",     short:"N/A",    bg:"#E5E7EB", fg:"#374151", ring:"#9CA3AF" },
 };
 
-// ─── INSPECTION TYPES (landlord-specific) ──────────────────────────────────
-// Each inspection the landlord creates has one of these types. Imported tenant
-// bundles are tagged TENANT_MOVE_IN or TENANT_MOVE_OUT based on which phase
-// has data. A bundle with both move-in AND move-out data gets split into two
-// read-only inspections at import time so they can be individually compared.
+// ─── INSPECTION TYPES ──────────────────────────────────────────────────────
+// Order = tenancy lifecycle: Baseline → Mid-lease → Post-tenant → Turnover → Other
+//
+// `defaultSlot` controls where capture data lands in rooms[id].{moveIn|moveOut}.
+// `tenancyLink` describes how this type relates to tenancies:
+//   'tenancy'  — belongs to one tenancy
+//   'between'  — lives between tenancies (turnover)
+//   'imported' — created by import pipeline
+// ────────────────────────────────────────────────────────────────────────────
 export const INSPECTION_TYPES = {
-  BASELINE:        { id: 'baseline',        label: 'Baseline',            icon: '📋', editable: true,  source: 'landlord',
+  BASELINE:        { id: 'baseline',        label: 'Baseline',        icon: '📋', editable: true,  source: 'landlord', defaultSlot: 'moveIn',  tenancyLink: 'tenancy',
                      hint: 'Condition of the unit before a new tenant moves in' },
-  MID_LEASE:       { id: 'mid_lease',       label: 'Mid-lease walk',      icon: '👣', editable: true,  source: 'landlord',
+  MID_LEASE:       { id: 'mid_lease',       label: 'Mid-lease walk',  icon: '👣', editable: true,  source: 'landlord', defaultSlot: 'moveIn',  tenancyLink: 'tenancy',
                      hint: 'Quarterly or annual check-in during tenancy' },
-  POST_TENANT:     { id: 'post_tenant',     label: 'Post-tenant',         icon: '🏁', editable: true,  source: 'landlord',
-                     hint: 'Landlord\'s own walkthrough after tenant moves out' },
-  TURNOVER:        { id: 'turnover',        label: 'Turnover',            icon: '🔄', editable: true,  source: 'landlord',
-                     hint: 'After cleaning and repairs - sets the next tenant\'s baselines' },
-  OTHER:           { id: 'other',           label: 'Other',               icon: '📝', editable: true,  source: 'landlord',
+  POST_TENANT:     { id: 'post_tenant',     label: 'Post-tenant',     icon: '🏁', editable: true,  source: 'landlord', defaultSlot: 'moveOut', tenancyLink: 'tenancy',
+                     hint: 'Walkthrough the day the tenant hands back keys' },
+  TURNOVER:        { id: 'turnover',        label: 'Turnover',        icon: '🔄', editable: true,  source: 'landlord', defaultSlot: 'moveOut', tenancyLink: 'between',
+                     hint: 'After cleaning and repairs — sets the next tenant\'s baseline' },
+  OTHER:           { id: 'other',           label: 'Other',           icon: '📝', editable: true,  source: 'landlord', defaultSlot: 'moveIn',  tenancyLink: 'tenancy',
                      hint: 'Insurance, contractor, or custom inspection' },
-  TENANT_MOVE_IN:  { id: 'tenant_move_in',  label: 'Tenant move-in',      icon: '📥', editable: false, source: 'tenant',
+  TENANT_MOVE_IN:  { id: 'tenant_move_in',  label: 'Tenant move-in',  icon: '📥', editable: false, source: 'tenant',   defaultSlot: 'moveIn',  tenancyLink: 'imported',
                      hint: 'Imported from tenant — read-only' },
-  TENANT_MOVE_OUT: { id: 'tenant_move_out', label: 'Tenant move-out',     icon: '📤', editable: false, source: 'tenant',
+  TENANT_MOVE_OUT: { id: 'tenant_move_out', label: 'Tenant move-out', icon: '📤', editable: false, source: 'tenant',   defaultSlot: 'moveOut', tenancyLink: 'imported',
                      hint: 'Imported from tenant — read-only' },
 };
 
-// Convenience lookups
 export const LANDLORD_INSPECTION_TYPES = Object.values(INSPECTION_TYPES).filter(t => t.source === 'landlord');
 export const TENANT_INSPECTION_TYPES   = Object.values(INSPECTION_TYPES).filter(t => t.source === 'tenant');
+export const inspectionTypeById = (id) => Object.values(INSPECTION_TYPES).find(t => t.id === id) || null;
 
-// ─── THEME ─────────────────────────────────────────────────────────────────
-// Landlord app uses a darker, more "pro tool" palette vs tenant app's brighter
-// consumer-friendly style. Distinct enough that screenshots can't be confused
-// in marketing assets.
+// ─── THEME — cream/forest, ported from tenant styles.css ───────────────────
 export const THEME = {
-  bg:        '#0F172A',  // slate-900
-  bgCard:    '#1E293B',  // slate-800
-  bgElev:    '#334155',  // slate-700
-  border:    '#475569',  // slate-600
-  text:      '#F1F5F9',  // slate-100
-  textDim:   '#94A3B8',  // slate-400
-  accent:    '#7C3AED',  // violet-600 — matches tenant's "Send to Landlord" button
-  accentDim: '#5B21B6',  // violet-800
-  success:   '#10B981',  // emerald-500
-  warning:   '#F59E0B',  // amber-500
-  danger:    '#EF4444',  // red-500
-  tenant:    '#3B82F6',  // blue-500 — color-code tenant-sourced data
-  landlord:  '#7C3AED',  // violet — color-code landlord-sourced data
+  bg:        '#F5F2EE',
+  paper:     '#F9F7F4',
+  surface:   '#F0EDE8',
+  edge:      '#E7E3DC',
+  edgeStrong:'#C4B5A5',
+
+  ink:       '#1C1917',
+  inkSoft:   '#292524',
+  muted:     '#78716C',
+  muted2:    '#A8A29E',
+
+  brand:     '#1B3A2D',
+  brand2:    '#2D6A4F',
+  emerald:   '#065F46',
+
+  mint50:    '#F0FDF4',
+  mint100:   '#ECFDF5',
+  mint200:   '#D1FAE5',
+  mint300:   '#86EFAC',
+  mint400:   '#6EE7B7',
+  mint600:   '#059669',
+
+  tenant:    '#1E40AF',
+  landlord:  '#2D6A4F',
+
+  success:   '#059669',
+  warning:   '#D97706',
+  danger:    '#991B1B',
 };
 
 // ─── BUNDLE / STORAGE CONSTANTS ────────────────────────────────────────────
-export const PHOTO_ROOT = 'MoveOutShieldLandlord';  // distinct from tenant's 'MoveOutShield'
-export const STORAGE_KEY_PORTFOLIO = 'mosl_portfolio_v1';
-export const STORAGE_KEY_SETTINGS = 'mosl_settings_v1';
+export const PHOTO_ROOT = 'MoveOutShieldLandlord';
+export const STORAGE_KEY_PORTFOLIO = 'mosl_portfolio_v2';   // bumped from v1
+export const STORAGE_KEY_SETTINGS  = 'mosl_settings_v1';
 export const SUPPORTED_BUNDLE_SCHEMA_VERSIONS = [1];
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.2.0';
+export const PORTFOLIO_SCHEMA_VERSION = 2;
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
 export const totalItems = ROOMS.reduce((s, r) => s + r.items.length, 0);
@@ -159,3 +170,51 @@ export const blankRooms = () => {
   ROOMS.forEach(r => { d[r.id] = { moveIn: blankPhase(), moveOut: blankPhase() }; });
   return d;
 };
+
+// ─── INSPECTION COMPLETION METRICS ─────────────────────────────────────────
+// Powers the "23/25" chip on inspection cards. Only counts rooms the landlord
+// actually engaged with — denominator is rooms touched, not all rooms.
+// ────────────────────────────────────────────────────────────────────────────
+export function inspectionMetrics(inspection) {
+  if (!inspection) return { rated: 0, possible: 0, photos: 0 };
+  const type = inspectionTypeById(inspection.type);
+  const slot = type?.defaultSlot || 'moveIn';
+
+  let rated = 0;
+  let possible = 0;
+  let photos = 0;
+
+  for (const room of ROOMS) {
+    const phaseData = inspection.rooms?.[room.id]?.[slot];
+    if (!phaseData) continue;
+    const ratedHere = phaseData.statuses ? Object.keys(phaseData.statuses).length : 0;
+    const photosHere = phaseData.photos ? phaseData.photos.length : 0;
+    const hasNotes = (phaseData.notes || '').trim().length > 0;
+    if (ratedHere > 0 || photosHere > 0 || hasNotes) {
+      possible += room.items.length;
+      rated   += ratedHere;
+      photos  += photosHere;
+    }
+  }
+  return { rated, possible, photos };
+}
+
+// ─── DATE FORMATTING ───────────────────────────────────────────────────────
+export function formatDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+export function formatDateShort(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+export function formatTenancySpan(tenancy) {
+  if (!tenancy) return '';
+  const start = tenancy.startDate ? formatDate(tenancy.startDate) : '?';
+  const end = tenancy.endDate ? formatDate(tenancy.endDate) : 'ongoing';
+  return `${start} → ${end}`;
+}

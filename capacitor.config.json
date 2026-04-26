@@ -1,0 +1,26 @@
+{
+  "appId": "com.moveoutshield.landlord",
+  "appName": "MoveOut Shield Landlord",
+  "webDir": "dist",
+  "ios": {
+    "contentInset": "always",
+    "scheme": "MoveOutShieldLandlord"
+  },
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1500,
+      "launchAutoHide": false,
+      "launchFadeOutDuration": 200,
+      "backgroundColor": "#1B3A2D",
+      "showSpinner": false,
+      "splashFullScreen": true,
+      "splashImmersive": true,
+      "iosSpinnerStyle": "small",
+      "androidSpinnerStyle": "large",
+      "androidScaleType": "CENTER_CROP"
+    }
+  }
+}

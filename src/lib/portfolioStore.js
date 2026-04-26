@@ -1,47 +1,50 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// portfolioStore.js — local persistence for properties and inspections
+// portfolioStore.js — local persistence for properties, tenancies, inspections
 // ═══════════════════════════════════════════════════════════════════════════
-// Offline-first. No cloud, no accounts. Uses localStorage for portfolio
-// metadata; photos live on the filesystem at PHOTO_ROOT/<inspectionId>/
-// managed separately via PhotoStore (copied over from tenant app).
+// v0.2.0 schema: properties hold tenancies, tenancies hold most inspections.
+// Turnover inspections live on the property itself (between tenancies, no
+// tenancy assignment).
 //
-// Shape on disk (STORAGE_KEY_PORTFOLIO):
+// On-disk shape (STORAGE_KEY_PORTFOLIO):
 //   {
-//     version: 1,
+//     version: 2,
 //     properties: [
 //       {
 //         id, name, address, stateIdx, createdAt,
-//         inspections: [ inspection, inspection, ... ]
+//         tenancies: [
+//           { id, tenants[], rent, deposit, startDate, endDate, inspections[] },
+//           ...
+//         ],
+//         betweenInspections: [ /* turnover inspections */ ]
 //       }
 //     ]
 //   }
 //
-// An inspection shape:
+// inspection shape (unchanged from v0.1.0):
 //   {
-//     id, propertyId, type (see INSPECTION_TYPES.id), label,
-//     source: 'landlord' | 'tenant',
-//     editable: boolean,
+//     id, propertyId, tenancyId?, type, label, source, editable,
 //     createdAt, importedAt?, sourceBundleId?, sourceBundleHash?,
 //     tenantAppVersion?, stateIdx,
 //     rooms: { [roomId]: { moveIn: phase, moveOut: phase } }
 //   }
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { STORAGE_KEY_PORTFOLIO, uid, blankRooms, INSPECTION_TYPES } from './constants.js';
-
-const SCHEMA_VERSION = 1;
+import {
+  STORAGE_KEY_PORTFOLIO, PORTFOLIO_SCHEMA_VERSION,
+  uid, blankRooms, INSPECTION_TYPES, inspectionTypeById,
+  inspectionMetrics, formatTenancySpan,
+} from './constants.js';
 
 // ───────────────────────────────────────────────────────────────────────────
-// Load from disk. Returns an empty portfolio if nothing exists or if the
-// stored version is too old to read.
+// Load / save
 // ───────────────────────────────────────────────────────────────────────────
 export function loadPortfolio() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_PORTFOLIO);
     if (!raw) return emptyPortfolio();
     const parsed = JSON.parse(raw);
-    if (parsed.version !== SCHEMA_VERSION) {
-      console.warn(`Portfolio schema version mismatch (stored=${parsed.version}, app=${SCHEMA_VERSION}). Starting fresh.`);
+    if (parsed.version !== PORTFOLIO_SCHEMA_VERSION) {
+      console.warn(`Portfolio schema mismatch (stored=${parsed.version}, app=${PORTFOLIO_SCHEMA_VERSION}). Starting fresh.`);
       return emptyPortfolio();
     }
     return parsed;
@@ -53,7 +56,7 @@ export function loadPortfolio() {
 
 export function savePortfolio(portfolio) {
   try {
-    const payload = { ...portfolio, version: SCHEMA_VERSION };
+    const payload = { ...portfolio, version: PORTFOLIO_SCHEMA_VERSION };
     localStorage.setItem(STORAGE_KEY_PORTFOLIO, JSON.stringify(payload));
     return true;
   } catch (e) {
@@ -63,7 +66,7 @@ export function savePortfolio(portfolio) {
 }
 
 export function emptyPortfolio() {
-  return { version: SCHEMA_VERSION, properties: [] };
+  return { version: PORTFOLIO_SCHEMA_VERSION, properties: [] };
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -76,20 +79,19 @@ export function createProperty(portfolio, { name, address, stateIdx }) {
     address: address?.trim() || '',
     stateIdx: stateIdx === '' || stateIdx == null ? null : Number(stateIdx),
     createdAt: new Date().toISOString(),
-    inspections: [],
+    tenancies: [],
+    betweenInspections: [],
   };
-  const next = { ...portfolio, properties: [property, ...portfolio.properties] };
-  return { portfolio: next, property };
+  return { portfolio: { ...portfolio, properties: [property, ...portfolio.properties] }, property };
 }
 
 export function updateProperty(portfolio, propertyId, patch) {
-  const next = {
+  return {
     ...portfolio,
     properties: portfolio.properties.map(p =>
       p.id === propertyId ? { ...p, ...patch } : p
     ),
   };
-  return next;
 }
 
 export function deleteProperty(portfolio, propertyId) {
@@ -104,113 +106,309 @@ export function getProperty(portfolio, propertyId) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Inspection CRUD
+// Tenancy CRUD
 // ───────────────────────────────────────────────────────────────────────────
-export function createInspection(portfolio, propertyId, { typeId, label }) {
-  const typeEntry = Object.values(INSPECTION_TYPES).find(t => t.id === typeId);
-  if (!typeEntry) throw new Error(`Unknown inspection type: ${typeId}`);
-  if (typeEntry.source !== 'landlord') {
-    throw new Error(`Inspection type "${typeId}" can only be created by importing a tenant bundle.`);
-  }
-
-  const inspection = {
+export function createTenancy(portfolio, propertyId, { tenants, rent, deposit, startDate, endDate, copyFromTurnover }) {
+  const tenancy = {
     id: uid(),
-    propertyId,
-    type: typeId,
-    label: label?.trim() || typeEntry.label,
-    source: 'landlord',
-    editable: true,
-    createdAt: new Date().toISOString(),
-    stateIdx: getProperty(portfolio, propertyId)?.stateIdx ?? null,
-    rooms: blankRooms(),
+    tenants: Array.isArray(tenants) ? tenants.filter(t => t.trim()) : [tenants].filter(Boolean),
+    rent: rent === '' || rent == null ? null : Number(rent),
+    deposit: deposit === '' || deposit == null ? null : Number(deposit),
+    startDate: startDate || null,
+    endDate: endDate || null,
+    inspections: [],
   };
 
-  const next = addInspectionToProperty(portfolio, propertyId, inspection);
-  return { portfolio: next, inspection };
-}
-
-// Used by the import pipeline — adds a tenant-sourced (read-only) inspection
-export function addImportedInspection(portfolio, propertyId, inspection) {
-  return addInspectionToProperty(portfolio, propertyId, {
-    ...inspection,
-    propertyId,
-    source: 'tenant',
-    editable: false,
-  });
-}
-
-function addInspectionToProperty(portfolio, propertyId, inspection) {
-  return {
+  let next = {
     ...portfolio,
     properties: portfolio.properties.map(p =>
       p.id === propertyId
-        ? { ...p, inspections: [inspection, ...p.inspections] }
+        ? { ...p, tenancies: [tenancy, ...p.tenancies] }
         : p
     ),
   };
+
+  // If "copy from previous turnover" was selected, find the most recent
+  // turnover for this property and clone it as the new tenancy's baseline.
+  if (copyFromTurnover) {
+    const property = getProperty(portfolio, propertyId);
+    const lastTurnover = (property?.betweenInspections || [])
+      .filter(i => i.type === 'turnover')
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
+
+    if (lastTurnover) {
+      const baseline = cloneInspectionAs(lastTurnover, {
+        type: 'baseline',
+        label: 'Baseline (from last turnover)',
+        tenancyId: tenancy.id,
+      });
+      next = addInspectionToTenancy(next, propertyId, tenancy.id, baseline);
+    }
+  }
+
+  return { portfolio: next, tenancy };
 }
 
-export function updateInspection(portfolio, propertyId, inspectionId, patch) {
+export function updateTenancy(portfolio, propertyId, tenancyId, patch) {
   return {
     ...portfolio,
     properties: portfolio.properties.map(p => {
       if (p.id !== propertyId) return p;
       return {
         ...p,
-        inspections: p.inspections.map(insp => {
-          if (insp.id !== inspectionId) return insp;
-          if (!insp.editable) {
-            console.warn(`Refusing to edit read-only inspection ${inspectionId}`);
-            return insp;
-          }
-          return { ...insp, ...patch };
-        }),
+        tenancies: p.tenancies.map(t =>
+          t.id === tenancyId ? { ...t, ...patch } : t
+        ),
       };
     }),
   };
 }
 
-export function deleteInspection(portfolio, propertyId, inspectionId) {
+export function deleteTenancy(portfolio, propertyId, tenancyId) {
   return {
     ...portfolio,
     properties: portfolio.properties.map(p =>
       p.id === propertyId
-        ? { ...p, inspections: p.inspections.filter(i => i.id !== inspectionId) }
+        ? { ...p, tenancies: p.tenancies.filter(t => t.id !== tenancyId) }
         : p
     ),
   };
 }
 
-export function getInspection(portfolio, propertyId, inspectionId) {
+export function getTenancy(portfolio, propertyId, tenancyId) {
   const property = getProperty(portfolio, propertyId);
   if (!property) return null;
-  return property.inspections.find(i => i.id === inspectionId) || null;
+  return property.tenancies.find(t => t.id === tenancyId) || null;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Derived queries
+// Inspection CRUD
+// ───────────────────────────────────────────────────────────────────────────
+
+// Create a landlord-authored inspection. Routes into the right place based
+// on the type's tenancyLink:
+//   - 'tenancy' types attach to a specific tenancy (caller passes tenancyId)
+//   - 'between' types (turnover) attach to property.betweenInspections
+//   - 'imported' types should NOT be created here — use addImportedInspection
+export function createInspection(portfolio, propertyId, { typeId, label, tenancyId }) {
+  const typeEntry = inspectionTypeById(typeId);
+  if (!typeEntry) throw new Error(`Unknown inspection type: ${typeId}`);
+  if (typeEntry.source !== 'landlord') {
+    throw new Error(`Inspection type "${typeId}" can only be created by import.`);
+  }
+
+  const property = getProperty(portfolio, propertyId);
+  const inspection = {
+    id: uid(),
+    propertyId,
+    tenancyId: typeEntry.tenancyLink === 'between' ? null : (tenancyId || null),
+    type: typeId,
+    label: label?.trim() || typeEntry.label,
+    source: 'landlord',
+    editable: true,
+    createdAt: new Date().toISOString(),
+    stateIdx: property?.stateIdx ?? null,
+    rooms: blankRooms(),
+  };
+
+  let next;
+  if (typeEntry.tenancyLink === 'between') {
+    next = addInspectionToBetween(portfolio, propertyId, inspection);
+  } else {
+    if (!tenancyId) {
+      throw new Error(`Type "${typeId}" requires a tenancyId.`);
+    }
+    next = addInspectionToTenancy(portfolio, propertyId, tenancyId, inspection);
+  }
+
+  return { portfolio: next, inspection };
+}
+
+// Used by the import pipeline. Tenancy assignment is the caller's job —
+// usually auto-matched by date-range overlap.
+export function addImportedInspection(portfolio, propertyId, tenancyId, inspection) {
+  const enriched = {
+    ...inspection,
+    propertyId,
+    tenancyId: tenancyId || null,
+    source: 'tenant',
+    editable: false,
+  };
+  if (tenancyId) {
+    return addInspectionToTenancy(portfolio, propertyId, tenancyId, enriched);
+  }
+  // No tenancy — still attach but without a tenancyId so it appears in
+  // an "Unassigned imports" section. Caller should usually create a
+  // tenancy first then re-import, but this avoids data loss.
+  return addInspectionToBetween(portfolio, propertyId, enriched);
+}
+
+function addInspectionToTenancy(portfolio, propertyId, tenancyId, inspection) {
+  return {
+    ...portfolio,
+    properties: portfolio.properties.map(p => {
+      if (p.id !== propertyId) return p;
+      return {
+        ...p,
+        tenancies: p.tenancies.map(t =>
+          t.id === tenancyId
+            ? { ...t, inspections: [inspection, ...t.inspections] }
+            : t
+        ),
+      };
+    }),
+  };
+}
+
+function addInspectionToBetween(portfolio, propertyId, inspection) {
+  return {
+    ...portfolio,
+    properties: portfolio.properties.map(p =>
+      p.id === propertyId
+        ? { ...p, betweenInspections: [inspection, ...(p.betweenInspections || [])] }
+        : p
+    ),
+  };
+}
+
+export function updateInspection(portfolio, propertyId, inspectionId, patch) {
+  return mapInspections(portfolio, propertyId, (insp) => {
+    if (insp.id !== inspectionId) return insp;
+    if (!insp.editable) {
+      console.warn(`Refusing to edit read-only inspection ${inspectionId}`);
+      return insp;
+    }
+    return { ...insp, ...patch };
+  });
+}
+
+export function deleteInspection(portfolio, propertyId, inspectionId) {
+  return {
+    ...portfolio,
+    properties: portfolio.properties.map(p => {
+      if (p.id !== propertyId) return p;
+      return {
+        ...p,
+        tenancies: p.tenancies.map(t => ({
+          ...t,
+          inspections: t.inspections.filter(i => i.id !== inspectionId),
+        })),
+        betweenInspections: (p.betweenInspections || []).filter(i => i.id !== inspectionId),
+      };
+    }),
+  };
+}
+
+// Returns inspection regardless of where it lives (any tenancy or between)
+export function getInspection(portfolio, propertyId, inspectionId) {
+  const property = getProperty(portfolio, propertyId);
+  if (!property) return null;
+  for (const tenancy of property.tenancies) {
+    const found = tenancy.inspections.find(i => i.id === inspectionId);
+    if (found) return found;
+  }
+  return (property.betweenInspections || []).find(i => i.id === inspectionId) || null;
+}
+
+// Helper: walk every inspection in a property and apply transform fn
+function mapInspections(portfolio, propertyId, fn) {
+  return {
+    ...portfolio,
+    properties: portfolio.properties.map(p => {
+      if (p.id !== propertyId) return p;
+      return {
+        ...p,
+        tenancies: p.tenancies.map(t => ({
+          ...t,
+          inspections: t.inspections.map(fn),
+        })),
+        betweenInspections: (p.betweenInspections || []).map(fn),
+      };
+    }),
+  };
+}
+
+// Clone an inspection with new id and changed type/label/tenancyId.
+// Used by the "copy from previous turnover" feature.
+function cloneInspectionAs(inspection, overrides) {
+  return {
+    ...inspection,
+    id: uid(),
+    createdAt: new Date().toISOString(),
+    importedAt: undefined,
+    sourceBundleId: undefined,
+    sourceBundleHash: undefined,
+    source: 'landlord',
+    editable: true,
+    ...overrides,
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Returns ALL inspections for a property in date order, with their tenancy
+// context attached. Used by ChangesScreen's compare picker.
+// ───────────────────────────────────────────────────────────────────────────
+export function flatInspections(property) {
+  if (!property) return [];
+  const all = [];
+  for (const tenancy of property.tenancies) {
+    for (const insp of tenancy.inspections) {
+      all.push({ inspection: insp, tenancy });
+    }
+  }
+  for (const insp of (property.betweenInspections || [])) {
+    all.push({ inspection: insp, tenancy: null });
+  }
+  return all.sort((a, b) =>
+    new Date(b.inspection.createdAt) - new Date(a.inspection.createdAt)
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Status chip for portfolio property cards
 // ───────────────────────────────────────────────────────────────────────────
 export function propertyStatus(property) {
-  // Returns one of: "empty" | "baseline-only" | "tenant-active" | "turnover" | "dispute-ready"
-  // Used to show a status chip on the portfolio list.
-  const insps = property.inspections || [];
-  if (insps.length === 0) return 'empty';
+  const tenancies = property.tenancies || [];
+  const between = property.betweenInspections || [];
 
-  const hasLandlord = insps.some(i => i.source === 'landlord');
-  const hasTenantMoveIn = insps.some(i => i.type === 'tenant_move_in');
-  const hasTenantMoveOut = insps.some(i => i.type === 'tenant_move_out');
+  const totalInspections = tenancies.reduce((s, t) => s + t.inspections.length, 0) + between.length;
+  if (totalInspections === 0) return 'empty';
 
-  if (hasTenantMoveOut && hasLandlord) return 'dispute-ready';
-  if (hasTenantMoveOut) return 'turnover';
-  if (hasTenantMoveIn) return 'tenant-active';
-  if (hasLandlord) return 'baseline-only';
+  const activeTenancy = tenancies.find(t => !t.endDate);
+  if (activeTenancy) {
+    const hasTenantMoveOut = activeTenancy.inspections.some(i => i.type === 'tenant_move_out');
+    const hasLandlordPostTenant = activeTenancy.inspections.some(i => i.type === 'post_tenant');
+    if (hasTenantMoveOut && hasLandlordPostTenant) return 'dispute-ready';
+    if (hasTenantMoveOut) return 'turnover';
+    return 'tenant-active';
+  }
+
+  if (between.length > 0) return 'turnover';
+  if (tenancies.length > 0) return 'baseline-only';
   return 'empty';
 }
 
 export const STATUS_CHIPS = {
-  'empty':          { label: 'Empty',           color: '#64748B' },
-  'baseline-only':  { label: 'Baseline only',   color: '#3B82F6' },
-  'tenant-active':  { label: 'Tenant active',   color: '#10B981' },
-  'turnover':       { label: 'Turnover ready',  color: '#F59E0B' },
-  'dispute-ready':  { label: 'Ready to compare',color: '#7C3AED' },
+  'empty':          { label: 'Empty',           color: '#78716C' },
+  'baseline-only':  { label: 'Has history',     color: '#1E40AF' },
+  'tenant-active':  { label: 'Tenant active',   color: '#059669' },
+  'turnover':       { label: 'Turnover',        color: '#D97706' },
+  'dispute-ready':  { label: 'Compare ready',   color: '#2D6A4F' },
 };
+
+// ───────────────────────────────────────────────────────────────────────────
+// Find the tenancy whose date range contains the given date.
+// Used by the import pipeline to auto-route imported tenant inspections.
+// Returns null if no matching tenancy exists.
+// ───────────────────────────────────────────────────────────────────────────
+export function findTenancyForDate(property, isoDate) {
+  if (!property || !isoDate) return null;
+  const target = new Date(isoDate).getTime();
+  for (const tenancy of property.tenancies) {
+    if (!tenancy.startDate) continue;
+    const start = new Date(tenancy.startDate).getTime();
+    const end = tenancy.endDate ? new Date(tenancy.endDate).getTime() : Infinity;
+    if (target >= start && target <= end) return tenancy;
+  }
+  return null;
+}
