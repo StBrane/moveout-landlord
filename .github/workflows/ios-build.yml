@@ -159,24 +159,6 @@ jobs:
           cd ios/App
           pod install
 
-      - name: Debug — verify secrets reached the runner
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
-        run: |
-          # Print byte counts but never the actual values. Comparing these
-          # to local values tells us if GitHub's stored secrets match what
-          # we encoded locally.
-          echo "CERTIFICATE_BASE64 length: $(echo -n "$CERTIFICATE_BASE64" | wc -c)"
-          echo "CERTIFICATE_PASSWORD length: $(echo -n "$CERTIFICATE_PASSWORD" | wc -c)"
-          echo "$CERTIFICATE_BASE64" | base64 --decode > /tmp/test-cert.p12
-          echo "Decoded .p12 size: $(wc -c < /tmp/test-cert.p12) bytes"
-          # Check that the decoded file looks like a real .p12 (starts with 0x30 0x82)
-          xxd /tmp/test-cert.p12 | head -1
-          # Try to verify the password works (will print "Mac verify error" or cert info)
-          openssl pkcs12 -in /tmp/test-cert.p12 -info -nokeys -password "pass:$CERTIFICATE_PASSWORD" 2>&1 | head -20 || true
-          rm /tmp/test-cert.p12
-
       - name: Import signing certificate
         env:
           CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
