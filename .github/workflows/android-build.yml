@@ -1,0 +1,164 @@
+name: Build Landlord Android APK & AAB
+
+# ─────────────────────────────────────────────────────────────────────────
+# Mirrors the tenant app's android-build.yml with two key differences:
+#   1. applicationId is com.moveoutshield.landlord (not the tenant ID)
+#   2. AndroidManifest.xml is patched to register .mosinsp intent-filters
+#      so the landlord app can receive bundle files from the share sheet
+#      (tenant doesn't import bundles, only exports — no patch needed there)
+#
+# Required GitHub Secrets (separate from tenant — landlord has its own keystore):
+#   ANDROID_KEYSTORE_BASE64       — base64-encoded keystore.jks
+#   ANDROID_KEYSTORE_PASSWORD
+#   ANDROID_KEY_ALIAS
+#   ANDROID_KEY_PASSWORD
+#
+# Triggers:
+#   - push to main          → builds APK + AAB, uploads as artifacts
+#   - manual dispatch       → same, on-demand
+# ─────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22'
+
+      # NOTE: Rely on package.json version pins only. Do NOT add explicit
+      # `npm install @capacitor/ios @capacitor/android` here — it conflicts
+      # with the pinned versions and has caused build failures before.
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      # ─── Patch AndroidManifest.xml with .mosinsp intent-filters ─────────
+      # Inject before the closing </activity> of MainActivity. This makes
+      # MoveOut Shield Landlord show up in the "Open with" sheet for any
+      # .mosinsp file the user receives via email, Drive, etc.
+      - name: Patch AndroidManifest.xml with intent-filters
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+
+          python3 << 'PYEOF'
+          import re
+
+          INTENT_FILTERS = '''
+                  <intent-filter android:label="MoveOut Shield Inspection">
+                      <action android:name="android.intent.action.VIEW" />
+                      <category android:name="android.intent.category.DEFAULT" />
+                      <category android:name="android.intent.category.BROWSABLE" />
+                      <data android:scheme="content" />
+                      <data android:scheme="file" />
+                      <data android:mimeType="application/octet-stream" />
+                      <data android:mimeType="application/vnd.moveoutshield.inspection" />
+                      <data android:host="*" />
+                      <data android:pathPattern=".*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\..*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\..*\\\\..*\\\\.mosinsp" />
+                  </intent-filter>
+                  <intent-filter android:label="MoveOut Shield Inspection">
+                      <action android:name="android.intent.action.VIEW" />
+                      <category android:name="android.intent.category.DEFAULT" />
+                      <category android:name="android.intent.category.BROWSABLE" />
+                      <data android:scheme="content" />
+                      <data android:scheme="file" />
+                      <data android:host="*" />
+                      <data android:mimeType="*/*" />
+                      <data android:pathPattern=".*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\..*\\\\.mosinsp" />
+                      <data android:pathPattern=".*\\\\..*\\\\..*\\\\..*\\\\.mosinsp" />
+                  </intent-filter>'''
+
+          with open("android/app/src/main/AndroidManifest.xml", "r") as f:
+              content = f.read()
+
+          # Inject before the FIRST </activity> closing tag (which is MainActivity)
+          new_content = re.sub(r'</activity>', INTENT_FILTERS + '\n        </activity>', content, count=1)
+
+          with open("android/app/src/main/AndroidManifest.xml", "w") as f:
+              f.write(new_content)
+
+          print("AndroidManifest.xml patched with .mosinsp intent-filters")
+          PYEOF
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_BASE64" | base64 --decode > keystore.jks
+
+      # Build APK for sideloading and direct testing
+      - name: Build signed APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cd android
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=$GITHUB_WORKSPACE/keystore.jks \
+            -Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD \
+            -Pandroid.injected.signing.key.alias=$KEY_ALIAS \
+            -Pandroid.injected.signing.key.password=$KEY_PASSWORD
+
+      # Build AAB for Google Play Store submission
+      - name: Build signed AAB (for Play Store)
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cd android
+          ./gradlew bundleRelease \
+            -Pandroid.injected.signing.store.file=$GITHUB_WORKSPACE/keystore.jks \
+            -Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD \
+            -Pandroid.injected.signing.key.alias=$KEY_ALIAS \
+            -Pandroid.injected.signing.key.password=$KEY_PASSWORD
+
+      - name: Locate build outputs
+        run: |
+          echo "=== APK ==="
+          find android -name "*.apk" 2>/dev/null || echo "No APK found"
+          echo "=== AAB ==="
+          find android -name "*.aab" 2>/dev/null || echo "No AAB found"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moveout-shield-landlord-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
+
+      - name: Upload AAB artifact (upload this to Play Store)
+        uses: actions/upload-artifact@v4
+        with:
+          name: moveout-shield-landlord-aab
+          path: android/app/build/outputs/bundle/release/app-release.aab
+          retention-days: 30
