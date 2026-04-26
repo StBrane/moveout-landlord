@@ -51,8 +51,11 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Sync Capacitor
-        run: npx cap sync android
+      - name: Add and sync Android platform
+        run: |
+          rm -rf android
+          npx cap add android
+          npx cap sync android
 
       # ─── Patch AndroidManifest.xml with .mosinsp intent-filters ─────────
       # Inject before the closing </activity> of MainActivity. This makes
