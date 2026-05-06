@@ -199,10 +199,9 @@ export default function CaptureScreen({
       setStream(s);
     } catch (err) {
       setCamOpen(false);
-      // Mirror the tenant app's behavior: getUserMedia is the only camera
-      // entry point, no Capacitor plugin involved. On native, denied means
-      // the OS won't re-prompt — the user has to fix it in Settings. We
-      // surface that via an in-app modal rather than a bare alert.
+      // Mirror tenant pattern: getUserMedia is the only camera entry, no
+      // Capacitor plugin involved. Surface NotAllowedError via in-app modal
+      // (with Retry) instead of a bare alert that can't recover gracefully.
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         setPermissionDenied(true);
       } else if (err.name === 'NotFoundError' || err.name === 'OverconstrainedError') {
@@ -213,13 +212,13 @@ export default function CaptureScreen({
     }
   };
 
-  // Permission-denied modal state — replaces the original bare alert.
+  // Permission-denied modal state — replaces bare alerts.
   const [permissionDenied, setPermissionDenied] = useState(false);
 
   // Auto-open camera on mount when entering from "+ Photo Document" main tap.
-  // Only fires once per inspection id, and only if the inspection is brand
-  // new (no photos yet in the active room slot) — guards against re-triggering
-  // when the user navigates back into a partially-filled inspection.
+  // Fires once per inspection id, only on brand-new inspections (no photos
+  // in active room slot yet) — guards against re-triggering when the user
+  // navigates back into a partially-filled record.
   const autoOpenAttemptedRef = useRef(false);
   useEffect(() => {
     if (!autoOpenCamera) return;
@@ -584,6 +583,7 @@ export default function CaptureScreen({
           onSnap={snapPhoto}
           phaseLabel={phaseLabel}
           roomName={activeRoom.name}
+          photoCount={phaseData.photos.length}
         />
       )}
 
@@ -619,7 +619,15 @@ export default function CaptureScreen({
 // ═══════════════════════════════════════════════════════════════════════════
 // CameraOverlay — fullscreen camera view with snap, flip, close buttons
 // ═══════════════════════════════════════════════════════════════════════════
-function CameraOverlay({ videoRef, flash, onClose, onFlip, onSnap, phaseLabel, roomName }) {
+// Layout matches the tenant app's CameraOverlay: top bar has Close + room
+// label + Flip; bottom bar is a 3-column row with Done (left), shutter
+// button + photo count badge (center), and a small "Tap ● to capture" hint
+// (right). The photo count badge appears only when count > 0 and is the
+// quickest way for the user to confirm captures landed without leaving the
+// camera. ✕ Close (top) and ✕ Done (bottom) both close the camera — Close
+// reads as "abandon," Done reads as "I'm finished," but they do the same
+// thing structurally.
+function CameraOverlay({ videoRef, flash, onClose, onFlip, onSnap, phaseLabel, roomName, photoCount = 0 }) {
   return (
     <div style={{
       position: 'fixed', inset: 0, background: '#000',
@@ -664,60 +672,47 @@ function CameraOverlay({ videoRef, flash, onClose, onFlip, onSnap, phaseLabel, r
         )}
       </div>
 
+      {/* Bottom bar — 3-column flex with Done + shutter + hint, mirroring
+          the tenant app exactly so the two cameras feel like the same UI. */}
       <div style={{
-        padding: '14px 18px calc(env(safe-area-inset-bottom) + 18px) 18px',
-        background: 'rgba(0,0,0,0.6)',
-        display: 'flex', justifyContent: 'center',
+        background: '#111',
+        padding: '18px 24px',
+        paddingBottom: 'max(30px, calc(env(safe-area-inset-bottom, 8px) + 16px))',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
-        <button onClick={onSnap} style={{
-          background: '#fff', border: '4px solid rgba(255,255,255,0.6)',
-          width: 72, height: 72, borderRadius: '50%',
-          cursor: 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)',
-        }} />
+        <button onClick={onClose} style={{
+          color: '#aaa', fontSize: 14, padding: '8px 16px',
+          background: 'transparent', border: 'none', cursor: 'pointer',
+        }}>✕ Done</button>
+
+        <div style={{ position: 'relative' }}>
+          <button onClick={onSnap} style={{
+            width: 68, height: 68, borderRadius: '50%',
+            background: '#fff', border: '4px solid #555',
+            fontSize: 28, display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer',
+          }}>●</button>
+          {photoCount > 0 && (
+            <div style={{
+              position: 'absolute', top: -6, right: -6,
+              background: THEME.mint300, color: THEME.brand,
+              borderRadius: 20, minWidth: 22, height: 22,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 11, fontWeight: 800, padding: '0 5px',
+            }}>
+              {photoCount}
+            </div>
+          )}
+        </div>
+
+        <div style={{ color: '#777', fontSize: 12, textAlign: 'right' }}>
+          Tap ●<br />to capture
+        </div>
       </div>
     </div>
   );
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PermissionDeniedModal — shown when getUserMedia rejects with NotAllowedError
-// (camera permission denied, either just-now or permanently in the OS).
-// Replaces the bare alert from earlier versions with an in-app modal that
-// includes a Retry button and a clear explanation of where to enable access.
-// No native plugins are used — keeping the dependency surface flat.
-// ═══════════════════════════════════════════════════════════════════════════
-function PermissionDeniedModal({ onRetry, onDismiss }) {
-  return (
-    <div style={modalBackdrop}>
-      <div style={{
-        background: THEME.paper, borderRadius: 16, padding: 24,
-        maxWidth: 420, width: '100%',
-        border: `2px solid ${THEME.danger}`,
-        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
-      }}>
-        <div style={{ fontSize: 32, marginBottom: 8, textAlign: 'center' }}>📷</div>
-        <div style={{ fontSize: 17, fontWeight: 700, color: THEME.danger, marginBottom: 10, textAlign: 'center' }}>
-          Camera access is off
-        </div>
-        <div style={{ fontSize: 13, color: THEME.inkSoft, marginBottom: 14, lineHeight: 1.5 }}>
-          MoveOut Shield Landlord needs camera access to capture inspection photos.
-        </div>
-        <div style={{ fontSize: 12, color: THEME.muted, marginBottom: 18, lineHeight: 1.5 }}>
-          If you just declined the prompt, tap Retry. Otherwise, open
-          <strong> Settings → MoveOut Shield Landlord → Camera</strong> and turn it on,
-          then come back and tap Retry.
-        </div>
-        <button onClick={onRetry} style={{ ...btnPrimary, width: '100%', marginBottom: 8 }}>
-          Retry
-        </button>
-        <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>
-          Not now
-        </button>
-      </div>
-    </div>
-  );
-}
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PhotoPrimer — explains why we want Photos library access on iOS
@@ -745,6 +740,44 @@ function PhotoPrimer({ onContinue }) {
         </div>
         <button onClick={onContinue} style={{ ...btnPrimary, width: '100%' }}>
           Continue to camera
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PermissionDeniedModal — shown when getUserMedia rejects with NotAllowedError.
+// Replaces the bare alert. Includes a Retry button so if the user grants
+// permission via the OS prompt (or in Settings), they don't have to re-tap
+// the original Camera button — they can recover from inside the modal.
+// ═══════════════════════════════════════════════════════════════════════════
+function PermissionDeniedModal({ onRetry, onDismiss }) {
+  return (
+    <div style={modalBackdrop}>
+      <div style={{
+        background: THEME.paper, borderRadius: 16, padding: 24,
+        maxWidth: 420, width: '100%',
+        border: `2px solid ${THEME.danger}`,
+        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
+      }}>
+        <div style={{ fontSize: 32, marginBottom: 8, textAlign: 'center' }}>📷</div>
+        <div style={{ fontSize: 17, fontWeight: 700, color: THEME.danger, marginBottom: 10, textAlign: 'center' }}>
+          Camera access is off
+        </div>
+        <div style={{ fontSize: 13, color: THEME.inkSoft, marginBottom: 14, lineHeight: 1.5 }}>
+          MoveOut Shield Landlord needs camera access to capture inspection photos.
+        </div>
+        <div style={{ fontSize: 12, color: THEME.muted, marginBottom: 18, lineHeight: 1.5 }}>
+          If you just declined the prompt, tap Retry. Otherwise, open
+          <strong> Settings → MoveOut Shield Landlord → Camera</strong> and turn it on,
+          then come back and tap Retry.
+        </div>
+        <button onClick={onRetry} style={{ ...btnPrimary, width: '100%', marginBottom: 8 }}>
+          Retry
+        </button>
+        <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>
+          Not now
         </button>
       </div>
     </div>
