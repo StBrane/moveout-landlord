@@ -57,11 +57,26 @@ const IS_NATIVE = Capacitor.isNativePlatform();
 // Hash router — minimal, no dependency
 // ─────────────────────────────────────────────────────────────────────────
 function parseRoute(hash) {
-  const parts = (hash || '').replace(/^#\/?/, '').split('/').filter(Boolean);
+  // Hash format: "#/path/segments?key=value"
+  const raw = (hash || '').replace(/^#\/?/, '');
+  const [pathPart, queryPart] = raw.split('?');
+  const parts = pathPart.split('/').filter(Boolean);
+  const query = {};
+  if (queryPart) {
+    for (const kv of queryPart.split('&')) {
+      const [k, v] = kv.split('=');
+      if (k) query[decodeURIComponent(k)] = v == null ? '' : decodeURIComponent(v);
+    }
+  }
   if (parts.length === 0) return { name: 'portfolio' };
   if (parts[0] === 'property' && parts[1]) return { name: 'property', propertyId: parts[1] };
   if (parts[0] === 'capture' && parts[1] && parts[2]) {
-    return { name: 'capture', propertyId: parts[1], inspectionId: parts[2] };
+    return {
+      name: 'capture',
+      propertyId: parts[1],
+      inspectionId: parts[2],
+      autoOpenCamera: query.cam === '1',
+    };
   }
   if (parts[0] === 'compare' && parts[1] && parts[2] && parts[3]) {
     const ids = [parts[2], parts[3], parts[4]].filter(Boolean);
@@ -573,7 +588,10 @@ function App() {
           propertyId={route.propertyId}
           onBack={() => navigate('/')}
           onCompare={(ids) => navigate(`/compare/${route.propertyId}/${ids.join('/')}`)}
-          onCapture={(inspectionId) => navigate(`/capture/${route.propertyId}/${inspectionId}`)}
+          onCapture={(inspectionId, opts = {}) => {
+            const suffix = opts.autoOpenCamera ? '?cam=1' : '';
+            navigate(`/capture/${route.propertyId}/${inspectionId}${suffix}`);
+          }}
           onImportTenantReport={triggerFilePicker}
           onTenancyFindings={(tenancyId) => navigate(`/findings/${route.propertyId}/${tenancyId}`)}
           photoStore={photoStore}
@@ -585,6 +603,7 @@ function App() {
           setPortfolio={setPortfolio}
           propertyId={route.propertyId}
           inspectionId={route.inspectionId}
+          autoOpenCamera={route.autoOpenCamera}
           onBack={() => navigate(`/property/${route.propertyId}`)}
           photoStore={photoStore}
         />

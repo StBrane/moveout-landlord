@@ -1,9 +1,12 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // portfolioStore.js — local persistence for properties, tenancies, inspections
 // ═══════════════════════════════════════════════════════════════════════════
-// v0.2.0 schema: properties hold tenancies, tenancies hold most inspections.
-// Turnover inspections live on the property itself (between tenancies, no
-// tenancy assignment).
+// v0.3 schema: properties hold tenancies, tenancies hold most inspections.
+// Turnover, Property reference photos, and ad-hoc property-level Others
+// live on the property itself (between tenancies, no tenancy assignment).
+// Properties also hold attachedPdfs[] — external PDFs (receipts, invoices,
+// tenant-side reports) brought in via the file picker for bundling at PDF
+// generation time.
 //
 // On-disk shape (STORAGE_KEY_PORTFOLIO):
 //   {
@@ -15,12 +18,13 @@
 //           { id, tenants[], rent, deposit, startDate, endDate, inspections[] },
 //           ...
 //         ],
-//         betweenInspections: [ /* turnover inspections */ ]
+//         betweenInspections: [ /* turnover + property reference + property-level Others */ ],
+//         attachedPdfs: [ /* { id, fileName, path, importedAt, label?, pageCount? } */ ]
 //       }
 //     ]
 //   }
 //
-// inspection shape (unchanged from v0.1.0):
+// inspection shape (unchanged from v0.2):
 //   {
 //     id, propertyId, tenancyId?, type, label, source, editable,
 //     createdAt, importedAt?, sourceBundleId?, sourceBundleHash?,
@@ -81,6 +85,15 @@ export function createProperty(portfolio, { name, address, stateIdx }) {
     createdAt: new Date().toISOString(),
     tenancies: [],
     betweenInspections: [],
+    // FUTURE: property reference photos (canonical "this is what the unit
+    // looks like move-in ready") currently live in betweenInspections with
+    // type='other' and a 'Property reference' label so they're trivially
+    // distinguishable without a schema bump. If properties ever change
+    // ownership, or if the canonical-state concept needs to outlive specific
+    // lease lifecycles, migrate those records into a dedicated
+    // `propertyPhotos: []` array here. Migration: filter betweenInspections
+    // by label === 'Property reference', move into the new array.
+    attachedPdfs: [],
   };
   return { portfolio: { ...portfolio, properties: [property, ...portfolio.properties] }, property };
 }
@@ -186,10 +199,13 @@ export function getTenancy(portfolio, propertyId, tenancyId) {
 // ───────────────────────────────────────────────────────────────────────────
 
 // Create a landlord-authored inspection. Routes into the right place based
-// on the type's tenancyLink:
-//   - 'tenancy' types attach to a specific tenancy (caller passes tenancyId)
-//   - 'between' types (turnover) attach to property.betweenInspections
-//   - 'imported' types should NOT be created here — use addImportedInspection
+// on the type's tenancyLink and the caller's tenancyId:
+//   - 'between' types (turnover) always land in property.betweenInspections
+//   - 'tenancy' types with a tenancyId attach to that tenancy
+//   - 'tenancy' types with NO tenancyId (property-level Photo Documents like
+//     Property reference, ad-hoc property-level Others) ALSO land in
+//     betweenInspections — distinguished by label, not by type
+//   - 'imported' types should NOT be created here
 export function createInspection(portfolio, propertyId, { typeId, label, tenancyId }) {
   const typeEntry = inspectionTypeById(typeId);
   if (!typeEntry) throw new Error(`Unknown inspection type: ${typeId}`);
@@ -214,18 +230,19 @@ export function createInspection(portfolio, propertyId, { typeId, label, tenancy
   let next;
   if (typeEntry.tenancyLink === 'between') {
     next = addInspectionToBetween(portfolio, propertyId, inspection);
+  } else if (!tenancyId) {
+    // Property-level capture (no tenancy parent). Lands in betweenInspections
+    // alongside turnovers — distinguished by label rather than type.
+    next = addInspectionToBetween(portfolio, propertyId, inspection);
   } else {
-    if (!tenancyId) {
-      throw new Error(`Type "${typeId}" requires a tenancyId.`);
-    }
     next = addInspectionToTenancy(portfolio, propertyId, tenancyId, inspection);
   }
 
   return { portfolio: next, inspection };
 }
 
-// Used by the import pipeline. Tenancy assignment is the caller's job —
-// usually auto-matched by date-range overlap.
+// Used by the (now-dead) import pipeline. Kept for shape compatibility with
+// any v0.2 records still in localStorage that have source='tenant'.
 export function addImportedInspection(portfolio, propertyId, tenancyId, inspection) {
   const enriched = {
     ...inspection,
@@ -237,9 +254,6 @@ export function addImportedInspection(portfolio, propertyId, tenancyId, inspecti
   if (tenancyId) {
     return addInspectionToTenancy(portfolio, propertyId, tenancyId, enriched);
   }
-  // No tenancy — still attach but without a tenancyId so it appears in
-  // an "Unassigned imports" section. Caller should usually create a
-  // tenancy first then re-import, but this avoids data loss.
   return addInspectionToBetween(portfolio, propertyId, enriched);
 }
 
@@ -398,8 +412,7 @@ export const STATUS_CHIPS = {
 
 // ───────────────────────────────────────────────────────────────────────────
 // Find the tenancy whose date range contains the given date.
-// Used by the import pipeline to auto-route imported tenant inspections.
-// Returns null if no matching tenancy exists.
+// Kept for the diff engine's record-routing logic.
 // ───────────────────────────────────────────────────────────────────────────
 export function findTenancyForDate(property, isoDate) {
   if (!property || !isoDate) return null;
@@ -411,4 +424,68 @@ export function findTenancyForDate(property, isoDate) {
     if (target >= start && target <= end) return tenancy;
   }
   return null;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Attached PDFs — external PDFs imported at the property level (receipts,
+// repair invoices, contractor reports, tenant-side reports). These live as
+// files on disk under PHOTO_ROOT/<propertyId>/pdfs/ and the portfolio holds
+// only metadata. Selected at PDF generation time and merged via pdf-lib.
+// ───────────────────────────────────────────────────────────────────────────
+
+export function attachPdf(portfolio, propertyId, pdfRecord) {
+  // pdfRecord shape: { id, fileName, path, importedAt, label?, pageCount? }
+  return {
+    ...portfolio,
+    properties: portfolio.properties.map(p =>
+      p.id === propertyId
+        ? { ...p, attachedPdfs: [pdfRecord, ...(p.attachedPdfs || [])] }
+        : p
+    ),
+  };
+}
+
+export function detachPdf(portfolio, propertyId, pdfId) {
+  return {
+    ...portfolio,
+    properties: portfolio.properties.map(p =>
+      p.id === propertyId
+        ? { ...p, attachedPdfs: (p.attachedPdfs || []).filter(pdf => pdf.id !== pdfId) }
+        : p
+    ),
+  };
+}
+
+export function listAttachedPdfs(property) {
+  return property?.attachedPdfs || [];
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Auto-number the next "Other: N" record at this property.
+//
+// Custom-named Others (e.g. "Fridge install", "HVAC repair") are SKIPPED by
+// the regex — only records whose label matches /^Other:\s*\d+$/ count toward
+// the counter. So a property with [Fridge install, Other: 1, HVAC repair]
+// returns 2 next, not 4.
+//
+// Walks every inspection at the property (all tenancies + betweenInspections)
+// and finds the highest existing number, returns max+1, or 1 if none.
+// ───────────────────────────────────────────────────────────────────────────
+export function nextOtherCounter(property) {
+  if (!property) return 1;
+  const re = /^Other:\s*(\d+)$/;
+  let max = 0;
+  const allInspections = [
+    ...(property.tenancies || []).flatMap(t => t.inspections || []),
+    ...(property.betweenInspections || []),
+  ];
+  for (const insp of allInspections) {
+    if (insp.type !== 'other') continue;
+    const m = (insp.label || '').match(re);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > max) max = n;
+    }
+  }
+  return max + 1;
 }
