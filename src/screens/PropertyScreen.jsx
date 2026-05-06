@@ -122,7 +122,10 @@ export default function PropertyScreen({
       tenancyId,
     });
     setPortfolio(next);
-    if (onCapture) onCapture(inspection.id);
+    // opts.autoOpenCamera is set by the Photo Document main-tap path so the
+    // user lands on the capture screen with the camera already open instead
+    // of having to tap a Camera button there.
+    if (onCapture) onCapture(inspection.id, { autoOpenCamera: !!opts.autoOpenCamera });
   };
 
   // ─── Property Photos (canonical reference gallery) ────────────────────
@@ -817,9 +820,11 @@ function PhotoDocumentSplitButton({ tenancy, property, onCreate, onOpenExisting 
   };
 
   const handleMainTap = () => {
-    // Default behavior: create an Other:N+1 record immediately, no dropdown
+    // Default behavior: create an Other:N+1 record immediately and open the
+    // camera right away on the capture screen — main tap is the "I want to
+    // shoot photos right now" shortcut.
     const n = nextOtherCounter(property);
-    onCreate('other', { label: `Other: ${n}` });
+    onCreate('other', { label: `Other: ${n}`, autoOpenCamera: true });
   };
 
   const handleTypePick = (typeId) => {
@@ -1417,13 +1422,24 @@ function sanitizeMoney(value) {
 }
 
 function NewTenancyModal({ property, activeTenancy, onCreate, onCancel, pendingTypeLabel }) {
+  // Default the end date to one year from the start date. The user can still
+  // clear it (blank = active lease) or pick a different date. Recomputed
+  // whenever startDate changes, but only if the user hasn't manually edited
+  // endDate (tracked via endDateTouched).
+  const today = new Date().toISOString().slice(0, 10);
+  const oneYearFromToday = (() => {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() + 1);
+    return d.toISOString().slice(0, 10);
+  })();
   const [form, setForm] = useState({
     tenants: '', rent: '', deposit: '',
-    startDate: new Date().toISOString().slice(0, 10),
-    endDate: '',
+    startDate: today,
+    endDate: oneYearFromToday,
     copyFromTurnover: false,
     endActiveLeaseToday: !!activeTenancy,
   });
+  const [endDateTouched, setEndDateTouched] = useState(false);
 
   const hasPriorTurnover = (property.betweenInspections || []).some(i => i.type === 'turnover');
   const activeLeaseTenants = activeTenancy?.tenants?.length > 0
@@ -1431,10 +1447,9 @@ function NewTenancyModal({ property, activeTenancy, onCreate, onCancel, pendingT
     : '(unnamed tenant)';
 
   const handleSubmit = () => {
-    if (!form.tenants.trim()) {
-      alert('At least one tenant name is required');
-      return;
-    }
+    // Tenant name is optional — if blank, the lease is created with no
+    // named tenant and can be edited later. Dates were defaulted to today
+    // and today+1yr in initial form state.
     onCreate(form);
   };
 
@@ -1459,22 +1474,36 @@ function NewTenancyModal({ property, activeTenancy, onCreate, onCancel, pendingT
           </div>
         )}
 
-        <Label>Tenant name(s) *</Label>
+        <Label>Tenant name(s) <span style={{ color: THEME.muted2, fontWeight: 400 }}>(optional)</span></Label>
         <input style={input}
           placeholder="Jane Doe, John Doe"
           value={form.tenants}
           onChange={e => setForm({ ...form, tenants: e.target.value })} />
-        <Hint>Separate multiple tenants with commas.</Hint>
+        <Hint>Separate multiple tenants with commas. Leave blank to create an unnamed lease — you can add tenants later.</Hint>
 
         <Label>Move-in date</Label>
         <input style={input} type="date"
           value={form.startDate}
-          onChange={e => setForm({ ...form, startDate: clampDate(e.target.value) })} />
+          onChange={e => {
+            const newStart = clampDate(e.target.value);
+            setForm(f => {
+              // Auto-shift end date to start+1yr if user hasn't edited it
+              if (!endDateTouched && newStart) {
+                const d = new Date(newStart);
+                d.setFullYear(d.getFullYear() + 1);
+                return { ...f, startDate: newStart, endDate: d.toISOString().slice(0, 10) };
+              }
+              return { ...f, startDate: newStart };
+            });
+          }} />
 
-        <Label>Move-out date <span style={{ color: THEME.muted2, fontWeight: 400 }}>(leave blank if active)</span></Label>
+        <Label>Move-out date <span style={{ color: THEME.muted2, fontWeight: 400 }}>(defaults to 1 year — clear if active)</span></Label>
         <input style={input} type="date"
           value={form.endDate}
-          onChange={e => setForm({ ...form, endDate: clampDate(e.target.value) })} />
+          onChange={e => {
+            setEndDateTouched(true);
+            setForm({ ...form, endDate: clampDate(e.target.value) });
+          }} />
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <div>
