@@ -51,7 +51,7 @@ const IS_NATIVE = Capacitor.isNativePlatform();
 
 export default function CaptureScreen({
   portfolio, setPortfolio, propertyId, inspectionId,
-  onBack, photoStore,
+  onBack, photoStore, autoOpenCamera,
 }) {
   const property = getProperty(portfolio, propertyId);
   const inspection = getInspection(portfolio, propertyId, inspectionId);
@@ -184,6 +184,21 @@ export default function CaptureScreen({
     openCam();
   };
 
+  // Auto-open camera on mount when entering from "+ Photo Document" main tap.
+  // Only fires once per inspection id, and only if the inspection is brand
+  // new (no photos yet in the active room slot) — guards against re-triggering
+  // when the user navigates back into a partially-filled inspection.
+  const autoOpenAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (!autoOpenCamera) return;
+    if (autoOpenAttemptedRef.current) return;
+    if (!inspection || !inspection.editable) return;
+    const photos = inspection.rooms?.[activeRoomId]?.[slot]?.photos || [];
+    if (photos.length > 0) return;  // user came back to existing record — don't hijack
+    autoOpenAttemptedRef.current = true;
+    requestOpenCam();
+  }, [autoOpenCamera, inspection?.id]);
+
   const dismissPhotoPrimer = () => {
     markPhotoPrimerSeen();
     setPhotoPrimer(false);
@@ -192,6 +207,39 @@ export default function CaptureScreen({
 
   const openCam = async () => {
     setCamOpen(true);
+
+    // Native: check + request camera permission via Capacitor first. This
+    // avoids the situation where getUserMedia immediately rejects with
+    // NotAllowedError on iOS/Android because the OS denied state is sticky.
+    // Only if permission is permanently denied do we fall through to the
+    // "open settings" UI — and we provide a button to open settings directly
+    // rather than instructing the user to navigate by hand.
+    if (IS_NATIVE) {
+      try {
+        const { Camera } = await import('@capacitor/camera');
+        let perm = await Camera.checkPermissions();
+        // States: 'granted' | 'denied' | 'prompt' | 'prompt-with-rationale' | 'limited'
+        if (perm.camera !== 'granted' && perm.camera !== 'limited') {
+          if (perm.camera === 'denied') {
+            // Already permanently denied — ask getUserMedia anyway in case
+            // OS state has been updated since last check, but if it fails
+            // we'll surface the settings-open dialog.
+          } else {
+            const requested = await Camera.requestPermissions({ permissions: ['camera'] });
+            if (requested.camera !== 'granted' && requested.camera !== 'limited') {
+              setCamOpen(false);
+              setPermissionDenied(true);
+              return;
+            }
+          }
+        }
+      } catch (e) {
+        // @capacitor/camera not available or threw — fall through to
+        // getUserMedia, which has its own error path. This keeps web working.
+        console.warn('Camera permission check skipped:', e?.message || e);
+      }
+    }
+
     try {
       const s = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: facing, width: { ideal: 1920 } },
@@ -200,10 +248,46 @@ export default function CaptureScreen({
     } catch (err) {
       setCamOpen(false);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        alert('Camera permission denied — enable it in Settings → Apps → MoveOut Shield Landlord → Permissions → Camera');
+        setPermissionDenied(true);
       } else {
         alert('Camera unavailable: ' + (err.message || 'unknown error'));
       }
+    }
+  };
+
+  // Permission-denied modal state — shown instead of a bare alert. Lets the
+  // user open app settings with one tap on native.
+  const [permissionDenied, setPermissionDenied] = useState(false);
+
+  const openAppSettings = async () => {
+    setPermissionDenied(false);
+    if (!IS_NATIVE) return;
+    try {
+      // Capacitor doesn't expose a direct openAppSettings on @capacitor/app;
+      // most apps use the @capacitor-community/app-settings plugin or
+      // platform-specific code. We try the most common availability paths
+      // and fall back to a clear message if neither works.
+      try {
+        const mod = await import('capacitor-native-settings');
+        await mod.NativeSettings.open({
+          optionAndroid: 'application_details',
+          optionIOS: 'app',
+        });
+        return;
+      } catch (_) { /* plugin not installed */ }
+
+      try {
+        const { App } = await import('@capacitor/app');
+        // @capacitor/app's openUrl can launch app-settings: on iOS
+        if (Capacitor.getPlatform() === 'ios') {
+          await App.openUrl({ url: 'app-settings:' });
+          return;
+        }
+      } catch (_) { /* fall through */ }
+
+      alert('Open your device Settings → Apps → MoveOut Shield Landlord → Permissions → Camera to enable.');
+    } catch (e) {
+      alert('Could not open settings automatically. Please open Settings → Apps → MoveOut Shield Landlord → Permissions → Camera.');
     }
   };
 
@@ -567,6 +651,14 @@ export default function CaptureScreen({
         <PhotoPrimer onContinue={dismissPhotoPrimer} />
       )}
 
+      {/* ─── Camera permission denied modal ───────────────────────────── */}
+      {permissionDenied && (
+        <PermissionDeniedModal
+          onOpenSettings={openAppSettings}
+          onDismiss={() => setPermissionDenied(false)}
+        />
+      )}
+
       {/* ─── Lightbox ─────────────────────────────────────────────────── */}
       {lightbox && phaseData.photos[lightbox.idx] && (
         <Lightbox
@@ -679,9 +771,44 @@ function PhotoPrimer({ onContinue }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// PermissionDeniedModal — shown when the OS has permanently denied camera
+// access. Replaces the bare "go to Settings" alert with a tap-to-open flow.
+// ═══════════════════════════════════════════════════════════════════════════
+function PermissionDeniedModal({ onOpenSettings, onDismiss }) {
+  return (
+    <div style={modalBackdrop}>
+      <div style={{
+        background: THEME.paper, borderRadius: 16, padding: 24,
+        maxWidth: 420, width: '100%',
+        border: `2px solid ${THEME.danger}`,
+        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
+      }}>
+        <div style={{ fontSize: 32, marginBottom: 8, textAlign: 'center' }}>📷</div>
+        <div style={{ fontSize: 17, fontWeight: 700, color: THEME.danger, marginBottom: 10, textAlign: 'center' }}>
+          Camera access is off
+        </div>
+        <div style={{ fontSize: 13, color: THEME.inkSoft, marginBottom: 18, lineHeight: 1.5 }}>
+          MoveOut Shield Landlord needs camera access to capture inspection photos.
+          You previously declined the permission, so iOS/Android won't ask again — you'll
+          need to enable it in Settings.
+        </div>
+        <button onClick={onOpenSettings} style={{ ...btnPrimary, width: '100%', marginBottom: 8 }}>
+          Open Settings
+        </button>
+        <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>
+          Not now
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Lightbox — full-size photo with metadata, delete option
 // ═══════════════════════════════════════════════════════════════════════════
 function Lightbox({ photo, src, onClose, onDelete }) {
+
   return (
     <div style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)',
