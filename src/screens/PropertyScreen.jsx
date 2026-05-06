@@ -235,7 +235,9 @@ export default function PropertyScreen({
 
   const handlePillsRecordPick = (inspectionId) => {
     setPillsPickerTenancyId(null);
-    if (onCapture) onCapture(inspectionId);
+    // route: 'capture' explicitly — Pills picks always go to CaptureScreen
+    // (per-room items+statuses surface), not the photodoc grid surface.
+    if (onCapture) onCapture(inspectionId, { route: 'capture' });
   };
 
   // ─── PDF generation from bottom sheet ─────────────────────────────────
@@ -374,10 +376,10 @@ export default function PropertyScreen({
       padding: 'calc(env(safe-area-inset-top) + 0px) 0 calc(env(safe-area-inset-bottom) + 32px) 0',
       minHeight: '100vh', background: THEME.bg,
     }}>
-      {/* ─── Forest header ──────────────────────────────────────────────── */}
+      {/* ─── Forest header (condensed two-column layout) ───────────────── */}
       <header style={{
         background: THEME.brand, color: THEME.mint50,
-        padding: 'calc(env(safe-area-inset-top) + 14px) 18px 18px 18px',
+        padding: 'calc(env(safe-area-inset-top) + 14px) 18px 16px 18px',
         borderBottomLeftRadius: 18, borderBottomRightRadius: 18,
         marginBottom: 18,
       }}>
@@ -385,33 +387,46 @@ export default function PropertyScreen({
           background: 'rgba(255,255,255,0.1)', color: THEME.mint100,
           border: `1px solid ${THEME.mint400}`, borderRadius: 999,
           padding: '6px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-          marginBottom: 12, display: 'inline-flex', alignItems: 'center', gap: 6,
+          marginBottom: 10, display: 'inline-flex', alignItems: 'center', gap: 6,
         }}>
           <span style={{ fontSize: 14 }}>‹</span> Portfolio
         </button>
 
-        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: THEME.mint50 }}>
-          {property.name}
-        </h1>
-        {property.address && (
-          <div style={{ fontSize: 13, color: THEME.mint200, marginTop: 4, opacity: 0.95 }}>
-            {property.address}
+        {/* Two-column: name + address on left, state info pinned right */}
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h1 style={{
+              margin: 0, fontSize: 21, fontWeight: 700, color: THEME.mint50,
+              letterSpacing: '-0.2px', lineHeight: 1.15,
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }}>
+              {property.name}
+            </h1>
+            {property.address && (
+              <div style={{
+                fontSize: 12, color: THEME.mint200, marginTop: 3, opacity: 0.95,
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}>
+                {property.address}
+              </div>
+            )}
           </div>
-        )}
-        {state && (
-          <div style={{
-            fontSize: 11, color: THEME.mint200, marginTop: 8, opacity: 0.85,
-            display: 'flex', gap: 10, flexWrap: 'wrap',
-          }}>
-            <span>{state[0]} ({state[1]})</span>
-            <span>·</span>
-            <span>{state[2]} day return</span>
-            <span>·</span>
-            <span style={{ flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {state[4]}
-            </span>
-          </div>
-        )}
+
+          {state && (
+            <div style={{
+              flexShrink: 0, textAlign: 'right',
+              fontSize: 10, color: THEME.mint200, opacity: 0.85,
+              lineHeight: 1.4,
+              maxWidth: 110,
+            }}>
+              <div style={{ fontWeight: 700, color: THEME.mint100 }}>
+                {state[1]}
+              </div>
+              <div>{state[2]} day return</div>
+              <div>{state[3]}</div>
+            </div>
+          )}
+        </div>
       </header>
 
       <div style={{ padding: '0 16px' }}>
@@ -426,6 +441,25 @@ export default function PropertyScreen({
           attachedCount={listAttachedPdfs(property).length}
           onOpenAttachedPdfs={() => setAttachedPdfsOpen(true)}
         />
+
+        {/* ─── Generate PDF (moved from bottom anchor — primary action) ──── */}
+        <div style={{ marginBottom: 12 }}>
+          <button
+            onClick={handleGenerateButtonTap}
+            disabled={(!hasInspections && !hasAttachedPdfs) || pdfBusy}
+            style={{
+              ...btnPdfReport,
+              cursor: ((hasInspections || hasAttachedPdfs) && !pdfBusy) ? 'pointer' : 'not-allowed',
+              opacity: ((hasInspections || hasAttachedPdfs) && !pdfBusy) ? 1 : 0.5,
+            }}
+          >
+            {pdfBusy
+              ? 'Building PDF…'
+              : (hasInspections || hasAttachedPdfs)
+                ? '📄 Generate Report (PDF)'
+                : 'Generate Report (PDF) — nothing to export yet'}
+          </button>
+        </div>
 
         {/* ─── + New Lease ───────────────────────────────────────────────*/}
         <div style={{ marginBottom: 16 }}>
@@ -479,25 +513,11 @@ export default function PropertyScreen({
         )}
 
         {/* ─── Bottom anchor row ─────────────────────────────────────────── */}
+        {/* Generate PDF moved to top of screen for primary-action surfacing.
+            Bottom anchor keeps just the back-to-portfolio escape. */}
         <div style={{
           marginTop: 24, display: 'flex', flexDirection: 'column', gap: 10,
         }}>
-          <button
-            onClick={handleGenerateButtonTap}
-            disabled={(!hasInspections && !hasAttachedPdfs) || pdfBusy}
-            style={{
-              ...btnPdfReport,
-              cursor: ((hasInspections || hasAttachedPdfs) && !pdfBusy) ? 'pointer' : 'not-allowed',
-              opacity: ((hasInspections || hasAttachedPdfs) && !pdfBusy) ? 1 : 0.5,
-            }}
-          >
-            {pdfBusy
-              ? 'Building PDF…'
-              : (hasInspections || hasAttachedPdfs)
-                ? '📄 Generate Report (PDF)'
-                : 'Generate Report (PDF) — nothing to export yet'}
-          </button>
-
           <button onClick={onBack} style={btnReturn}>
             ← Return to Portfolio
           </button>
@@ -566,16 +586,18 @@ export default function PropertyScreen({
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Lazy diff helper — pulls damageReport.js dynamically so it's not in the
-// initial render path. Only fires when generating a 2-way or 3-way comparison.
+// Lazy diff helper — pulls diff.js dynamically so it's not in the initial
+// render path. Returns the pairwise diff for 2-record selections, null for
+// anything else. comparisonPDF.js handles null by routing through its
+// "evidence bundle" path: cover + summary + photo galleries, no diff body.
+// 3-way matrix support was never implemented and is intentionally deferred —
+// the 2-record path is what the dispute-grade comparison case actually needs
+// (Baseline vs Post-tenant, Move-In vs Move-Out, etc.).
 // ═══════════════════════════════════════════════════════════════════════════
 async function buildDiff(inspections) {
-  const dr = await import('../lib/damageReport.js');
   if (inspections.length === 2) {
-    return dr.diffInspections(inspections[0], inspections[1]);
-  }
-  if (inspections.length === 3) {
-    return dr.threeWayMatrix(inspections[0], inspections[1], inspections[2]);
+    const { diffInspections } = await import('../lib/diff.js');
+    return diffInspections(inspections[0], inspections[1]);
   }
   return null;
 }
@@ -760,9 +782,9 @@ function TenancySection({
       {!isCollapsed && (
         <div style={{ padding: '0 14px 14px 14px' }}>
 
-          {/* Photo Document split button — replaces the old 6-button picker grid */}
+          {/* Photo Document button — single button, opens unified type picker */}
           {onCreateInspection && (
-            <PhotoDocumentSplitButton
+            <PhotoDocumentButton
               tenancy={tenancy}
               property={property}
               onCreate={onCreateInspection}
@@ -772,11 +794,11 @@ function TenancySection({
 
           {/* Pills button — opens record picker for editing per-room item statuses.
               Only shown when there's at least one record in this lease — nothing
-              to edit pills on otherwise. Photo Document main tap creates a record
-              first, so this button surfaces shortly after. */}
+              to edit pills on otherwise. Routes to CaptureScreen for the picked
+              record (the per-room items+statuses surface). */}
           {onOpenPills && tenancy.inspections.length > 0 && (
             <button onClick={onOpenPills} style={btnPills}>
-              <span style={{ fontSize: 16 }}>💊</span>
+              <span style={{ fontSize: 16 }}>🪄</span>
               <span>Pills · pick a record to edit</span>
             </button>
           )}
@@ -842,16 +864,23 @@ function TenancySection({
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PhotoDocumentSplitButton — main button + chevron dropdown
+// PhotoDocumentButton — single button, opens unified type picker on every tap
 // ═══════════════════════════════════════════════════════════════════════════
-// Tap main button → create unlabeled "Other: N+1" record, route to PhotoDoc
-//                   grid (new flat-grid surface), camera auto-opens.
-// Tap chevron → dropdown with 5 type options (Baseline, Mid-lease, Post-tenant,
-// Turnover, Other-with-custom-label). Caps preserved on Baseline/Mid-lease/
-// Post-tenant. Turnover and Other are uncapped. Chevron picks route to
-// CaptureScreen (per-room items+statuses surface).
-function PhotoDocumentSplitButton({ tenancy, property, onCreate, onOpenExisting }) {
-  const [dropdownOpen, setDropdownOpen] = useState(false);
+// v0.3.0+ unification: the chevron-vs-main split was confusing — main hid
+// types behind a sub-action and silently picked Other:N. Now every tap of
+// + Photo Document opens a picker showing all type options prominently:
+//
+//   📋 Baseline           (capped — shows ✓ exists if already used)
+//   📋 Mid-lease          (capped — shows ✓ exists if already used)
+//   📋 Post-tenant        (capped — shows ✓ exists if already used)
+//   🔄 Turnover           (uncapped, amber accent — between-tenancy)
+//   📝 Other (Other: N)   (uncapped — quick-tap auto-numbered Other)
+//   📝 Other (custom)     (uncapped — opens label prompt)
+//
+// All picks route to PhotoDocGridScreen with the camera auto-opened.
+// CaptureScreen is reached only via the Pills button.
+function PhotoDocumentButton({ tenancy, property, onCreate, onOpenExisting }) {
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [otherPromptOpen, setOtherPromptOpen] = useState(false);
   const [otherLabel, setOtherLabel] = useState('');
 
@@ -863,52 +892,38 @@ function PhotoDocumentSplitButton({ tenancy, property, onCreate, onOpenExisting 
     post_tenant: tenancy.inspections.find(i => i.type === 'post_tenant') || null,
   };
 
-  const handleMainTap = () => {
-    // Default behavior: create an Other:N+1 record immediately and route to
-    // the PhotoDoc grid surface with the camera auto-opened. Main tap is
-    // the "I want to shoot photos right now" shortcut. The 'photodoc' route
-    // hint tells main.jsx to open PhotoDocGridScreen (flat-grid + paint-mode
-    // tagging) instead of CaptureScreen (per-room items+statuses).
-    const n = nextOtherCounter(property);
-    onCreate('other', {
-      label: `Other: ${n}`,
-      autoOpenCamera: true,
-      route: 'photodoc',
-    });
-  };
-
   const handleTypePick = (typeId) => {
-    setDropdownOpen(false);
-    if (typeId === 'other') {
+    setPickerOpen(false);
+    if (typeId === 'other-custom') {
       setOtherPromptOpen(true);
       return;
     }
+    if (typeId === 'other-numbered') {
+      const n = nextOtherCounter(property);
+      // Auto-numbered Other → photodoc with camera auto-open
+      onCreate('other', { label: `Other: ${n}`, autoOpenCamera: true });
+      return;
+    }
+    if (typeId === 'turnover') {
+      onCreate('turnover', { autoOpenCamera: true });
+      return;
+    }
+    // Capped types: open existing if present, otherwise create
     const existing = existingByType[typeId];
     if (existing) {
       if (onOpenExisting) onOpenExisting(existing.id);
       return;
     }
-    // No `route` — defaults to CaptureScreen (per-room items+statuses).
-    // Typed records (Baseline/Mid-lease/Post-tenant/Turnover) are
-    // dispute-grade evidence captures, not fast Photo Documents, so
-    // they belong in the structured CaptureScreen surface.
-    onCreate(typeId);
-  };
-
-  const handleTurnoverPick = () => {
-    setDropdownOpen(false);
-    onCreate('turnover');
+    onCreate(typeId, { autoOpenCamera: true });
   };
 
   const submitOtherLabel = () => {
     const trimmed = otherLabel.trim();
     if (trimmed) {
-      // Custom-labeled Other → CaptureScreen (per-room items+statuses)
-      // since the user picked it intentionally for structured documentation.
-      onCreate('other', { label: trimmed });
+      onCreate('other', { label: trimmed, autoOpenCamera: true });
     } else {
       const n = nextOtherCounter(property);
-      onCreate('other', { label: `Other: ${n}` });
+      onCreate('other', { label: `Other: ${n}`, autoOpenCamera: true });
     }
     setOtherLabel('');
     setOtherPromptOpen(false);
@@ -920,26 +935,16 @@ function PhotoDocumentSplitButton({ tenancy, property, onCreate, onOpenExisting 
         marginBottom: 12, paddingTop: 8,
         borderTop: `1px dashed ${THEME.edge}`,
       }}>
-        <div style={{ display: 'flex', gap: 0, marginTop: 8 }}>
-          <button onClick={handleMainTap} style={splitMainBtn}>
-            + Photo Document
-          </button>
-          <button
-            onClick={() => setDropdownOpen(true)}
-            style={splitChevronBtn}
-            aria-label="Pick inspection type"
-          >
-            ▾
-          </button>
-        </div>
+        <button onClick={() => setPickerOpen(true)} style={photoDocBtn}>
+          + Photo Document
+        </button>
       </div>
 
-      {dropdownOpen && (
-        <TypeDropdown
+      {pickerOpen && (
+        <TypePicker
           existingByType={existingByType}
           onPick={handleTypePick}
-          onPickTurnover={handleTurnoverPick}
-          onClose={() => setDropdownOpen(false)}
+          onClose={() => setPickerOpen(false)}
         />
       )}
 
@@ -955,24 +960,41 @@ function PhotoDocumentSplitButton({ tenancy, property, onCreate, onOpenExisting 
   );
 }
 
-// ─── Type dropdown for the split button chevron ───────────────────────────
-function TypeDropdown({ existingByType, onPick, onPickTurnover, onClose }) {
+// ─── TypePicker — unified type picker with all options visible ───────────
+// All inspection types surface as prominent rows. Capped types show their
+// existing record's label when one already exists — tapping opens that
+// record (no duplicate creation). Uncapped types (Turnover, Other) always
+// create new records. Two Other variants: quick-numbered (Other: N+1) and
+// custom-labeled (opens prompt for user-typed label).
+function TypePicker({ existingByType, onPick, onClose }) {
   const tenancyTypes = LANDLORD_INSPECTION_TYPES
     .filter(t => t.tenancyLink === 'tenancy' && t.id !== 'other');
 
   return (
     <div style={modalBackdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={{
-        background: THEME.paper, borderRadius: 16, padding: 16,
-        maxWidth: 360, width: '100%',
+        background: THEME.paper, borderRadius: 16, padding: 18,
+        maxWidth: 380, width: '100%',
         border: `2px solid ${THEME.brand}`,
         boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
+        maxHeight: '85vh', overflowY: 'auto',
       }}>
-        <div style={{ fontSize: 13, color: THEME.muted, fontWeight: 600, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'center' }}>
+        <div style={{
+          fontSize: 13, color: THEME.muted, fontWeight: 600,
+          marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5,
+          textAlign: 'center',
+        }}>
+          Photo Document
+        </div>
+        <div style={{
+          fontSize: 16, fontWeight: 700, color: THEME.ink,
+          marginBottom: 16, textAlign: 'center',
+        }}>
           Pick a type
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {/* Lifecycle types — Baseline / Mid-lease / Post-tenant */}
           {tenancyTypes.map(type => {
             const existing = existingByType[type.id];
             const used = !!existing;
@@ -981,32 +1003,74 @@ function TypeDropdown({ existingByType, onPick, onPickTurnover, onClose }) {
                 key={type.id}
                 onClick={() => onPick(type.id)}
                 style={used ? typeOptionUsed : typeOption}
-                title={used ? `Open existing ${type.label.toLowerCase()}` : `New ${type.label.toLowerCase()}`}
               >
-                <span style={{ fontSize: 18, lineHeight: 1, opacity: used ? 0.6 : 1 }}>{type.icon}</span>
-                <span style={{ flex: 1, textAlign: 'left' }}>{type.label}</span>
-                {used && <span style={{ fontSize: 11, opacity: 0.7, fontWeight: 700 }}>✓ exists</span>}
+                <span style={{ fontSize: 22, lineHeight: 1, opacity: used ? 0.6 : 1 }}>{type.icon}</span>
+                <div style={{ flex: 1, textAlign: 'left' }}>
+                  <div style={{ fontSize: 14, fontWeight: 700 }}>{type.label}</div>
+                  <div style={{ fontSize: 10.5, color: used ? THEME.muted2 : THEME.muted, marginTop: 2 }}>
+                    {used ? `Existing: ${existing.label}` : type.hint || ''}
+                  </div>
+                </div>
+                {used && (
+                  <span style={{ fontSize: 11, opacity: 0.7, fontWeight: 700, color: THEME.brand2 }}>
+                    ✓ open
+                  </span>
+                )}
               </button>
             );
           })}
 
+          {/* Turnover — between-tenancy, amber accent */}
           <button
-            onClick={onPickTurnover}
-            style={{ ...typeOption, background: '#FEF3C7', borderColor: '#FDE68A', color: '#92400E' }}
-            title="New turnover"
+            onClick={() => onPick('turnover')}
+            style={{
+              ...typeOption,
+              background: '#FEF3C7', borderColor: '#FDE68A', color: '#92400E',
+            }}
           >
-            <span style={{ fontSize: 18, lineHeight: 1 }}>🔄</span>
-            <span style={{ flex: 1, textAlign: 'left' }}>Turnover</span>
+            <span style={{ fontSize: 22, lineHeight: 1 }}>🔄</span>
+            <div style={{ flex: 1, textAlign: 'left' }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>Turnover</div>
+              <div style={{ fontSize: 10.5, color: '#78350F', marginTop: 2 }}>
+                After cleaning &amp; repairs — sets the next tenant's baseline
+              </div>
+            </div>
           </button>
 
+          {/* Other (auto-numbered) — quick-tap path, no prompt */}
           <button
-            onClick={() => onPick('other')}
+            onClick={() => onPick('other-numbered')}
             style={typeOption}
           >
-            <span style={{ fontSize: 18, lineHeight: 1 }}>📝</span>
-            <span style={{ flex: 1, textAlign: 'left' }}>Other (custom label)</span>
+            <span style={{ fontSize: 22, lineHeight: 1 }}>📝</span>
+            <div style={{ flex: 1, textAlign: 'left' }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>Other</div>
+              <div style={{ fontSize: 10.5, color: THEME.muted, marginTop: 2 }}>
+                Auto-numbered as "Other: N"
+              </div>
+            </div>
+          </button>
+
+          {/* Other (custom label) — opens prompt for user-typed label */}
+          <button
+            onClick={() => onPick('other-custom')}
+            style={typeOption}
+          >
+            <span style={{ fontSize: 22, lineHeight: 1 }}>📝</span>
+            <div style={{ flex: 1, textAlign: 'left' }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>Other (custom label)</div>
+              <div style={{ fontSize: 10.5, color: THEME.muted, marginTop: 2 }}>
+                e.g. "fridge replacement", "noise complaint"
+              </div>
+            </div>
           </button>
         </div>
+
+        <button onClick={onClose} style={{
+          ...btnSecondary, marginTop: 14, width: '100%',
+        }}>
+          Cancel
+        </button>
       </div>
     </div>
   );
@@ -1096,7 +1160,7 @@ function PillsRecordPicker({ tenancy, onPick, onClose }) {
         maxHeight: '85vh', display: 'flex', flexDirection: 'column',
       }}>
         <div style={{ fontSize: 13, color: THEME.muted, fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-          💊 Pills
+          🪄 Pills
         </div>
         <div style={{ fontSize: 17, fontWeight: 700, color: THEME.ink, marginBottom: 4 }}>
           Pick a record to edit
@@ -1896,22 +1960,32 @@ const topRowBtnRight = {
   display: 'flex', alignItems: 'center', gap: 10,
 };
 
-// ─── Photo Document split button (per lease card) ─────────────────────────
-const splitMainBtn = {
-  flex: 1,
+// ─── Photo Document button (per lease card) ──────────────────────────────
+// Single full-width button. Opens unified type picker on every tap.
+const photoDocBtn = {
+  width: '100%',
   background: THEME.brand, color: THEME.mint50,
-  border: 'none', borderTopLeftRadius: 12, borderBottomLeftRadius: 12,
-  borderTopRightRadius: 0, borderBottomRightRadius: 0,
+  border: 'none', borderRadius: 12,
   padding: '14px 12px', fontSize: 14, fontWeight: 700, cursor: 'pointer',
+  marginTop: 8,
 };
 
-const splitChevronBtn = {
-  background: THEME.brand2, color: THEME.mint50,
-  border: 'none',
-  borderTopRightRadius: 12, borderBottomRightRadius: 12,
-  borderTopLeftRadius: 0, borderBottomLeftRadius: 0,
-  padding: '14px 18px', fontSize: 16, fontWeight: 700, cursor: 'pointer',
-  borderLeft: `1px solid ${THEME.mint600}`,
+// ─── Type picker options (unified, roomier rows) ──────────────────────────
+const typeOption = {
+  background: THEME.mint50, color: THEME.brand,
+  border: `2px solid ${THEME.mint300}`, borderRadius: 12,
+  padding: '12px 14px', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+  display: 'flex', alignItems: 'center', gap: 12,
+  minHeight: 56,
+};
+
+const typeOptionUsed = {
+  background: 'rgba(0, 0, 0, 0.04)', color: THEME.muted2,
+  border: `1.5px dashed ${THEME.edge}`, borderRadius: 12,
+  padding: '12px 14px', fontSize: 14, fontWeight: 500, cursor: 'pointer',
+  display: 'flex', alignItems: 'center', gap: 12,
+  minHeight: 56,
+  opacity: 0.85,
 };
 
 // ─── Pills button (lease card) ────────────────────────────────────────────
@@ -1927,21 +2001,7 @@ const btnPills = {
   display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
 };
 
-// ─── Type dropdown options ────────────────────────────────────────────────
-const typeOption = {
-  background: THEME.mint50, color: THEME.brand,
-  border: `1px solid ${THEME.mint300}`, borderRadius: 10,
-  padding: '12px 14px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer',
-  display: 'flex', alignItems: 'center', gap: 10,
-};
-
-const typeOptionUsed = {
-  background: 'rgba(0, 0, 0, 0.04)', color: THEME.muted2,
-  border: `1px dashed ${THEME.edge}`, borderRadius: 10,
-  padding: '12px 14px', fontSize: 13.5, fontWeight: 500, cursor: 'pointer',
-  display: 'flex', alignItems: 'center', gap: 10,
-  opacity: 0.7,
-};
+// ─── (typeOption / typeOptionUsed defined above with the photoDocBtn) ────
 
 const btnPrimary = {
   background: THEME.brand, color: THEME.mint50, border: 'none', borderRadius: 12,
