@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // PropertyScreen.jsx — single property view with tenancies and inspections
 // v0.3.0 — Photo Document split button, property-level PDF attach, bottom-sheet picker
+// v0.3.0+ — Pills button (existing record picker → CaptureScreen), photodoc routing
 // ═══════════════════════════════════════════════════════════════════════════
 // Layout:
 //   Header (forest green, big tap-target back button)
@@ -12,6 +13,7 @@
 //     - Past tenancies: collapsible
 //     - Each shows tenant info, dates, rent, deposit, then:
 //       - + Photo Document split button (main + chevron dropdown)
+//       - Pills button — opens record picker for editing per-room item statuses
 //       - List of inspections (tap to open, × to delete)
 //       - View Tenancy Findings button (if eligible)
 //   "Between tenancies" bucket for turnover + property-level Others
@@ -19,15 +21,16 @@
 //     - Generate Report (PDF) — opens bottom sheet picker
 //     - Return to Portfolio
 //
-// PDF generation flow:
-//   Tap Generate Report → bottom sheet opens (or skips if 1 inspection + 0 PDFs)
-//   User multi-selects Photo Documents and/or Attached PDFs
-//   Tap Generate PDF → routes to right builder:
-//     1 inspection, 0 PDFs → buildInspectionPDF
-//     2-3, 0 PDFs → buildComparisonPDF (real diff)
-//     4+, 0 PDFs → buildComparisonPDF (evidence bundle, diff suppressed)
-//     anything + PDFs → above + mergePdfs
-//   Output: native uses Filesystem + Share; web triggers download
+// Routing semantics for inspection records:
+//   Main "+ Photo Document" tap → creates Other:N record, routes to
+//     #/photodoc/<propertyId>/<inspectionId>?cam=1 (PhotoDocGridScreen)
+//   Chevron dropdown picks (Baseline / Mid-lease / Post-tenant / Turnover /
+//     Other-with-label) → routes to #/capture/<propertyId>/<inspectionId>
+//     (CaptureScreen, the per-room items+statuses surface)
+//   Pills button picks → routes to #/capture/<propertyId>/<inspectionId>
+//     (no autoOpenCamera since user is editing pills, not capturing)
+//   Inspection card tap → routes to #/capture/<propertyId>/<inspectionId>
+//     (preserves the user's last view of the record)
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { useState } from 'react';
@@ -78,6 +81,9 @@ export default function PropertyScreen({
   const [attachedPdfsOpen, setAttachedPdfsOpen] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
   const [editingTenancyId, setEditingTenancyId] = useState(null);
+  // Pills picker state — when set to a tenancy, the picker modal opens and
+  // shows that tenancy's records. User picks one → routes to CaptureScreen.
+  const [pillsPickerTenancyId, setPillsPickerTenancyId] = useState(null);
 
   if (!property) {
     return (
@@ -105,6 +111,9 @@ export default function PropertyScreen({
   // Now accepts an optional `opts` object with a custom `label` to override
   // the type's default label. Used by the Photo Document split button to
   // pass user-typed Other labels and auto-numbered Other:N labels.
+  // opts.route forwards to main.jsx's handleCapture: 'photodoc' routes to
+  // PhotoDocGridScreen (the new flat-grid surface for Other:N records),
+  // anything else routes to CaptureScreen (the per-room items+statuses surface).
   const handleNewInspection = (typeId, tenancyId, opts = {}) => {
     const typeEntry = inspectionTypeById(typeId);
     if (!typeEntry) return;
@@ -125,7 +134,15 @@ export default function PropertyScreen({
     // opts.autoOpenCamera is set by the Photo Document main-tap path so the
     // user lands on the capture screen with the camera already open instead
     // of having to tap a Camera button there.
-    if (onCapture) onCapture(inspection.id, { autoOpenCamera: !!opts.autoOpenCamera });
+    // opts.route lets the caller pick which screen to land on:
+    //   'photodoc' → PhotoDocGridScreen (new flat-grid surface)
+    //   undefined  → CaptureScreen (existing per-room UI, default)
+    if (onCapture) {
+      onCapture(inspection.id, {
+        autoOpenCamera: !!opts.autoOpenCamera,
+        route: opts.route,
+      });
+    }
   };
 
   // ─── Property Photos (canonical reference gallery) ────────────────────
@@ -208,6 +225,17 @@ export default function PropertyScreen({
     if (next.has(tenancyId)) next.delete(tenancyId);
     else next.add(tenancyId);
     setCollapsedTenancies(next);
+  };
+
+  // ─── Pills picker handler ─────────────────────────────────────────────
+  // Tapping the Pills button on a lease card opens a record picker scoped
+  // to that lease. User picks one → we route to CaptureScreen for editing
+  // (no autoOpenCamera; user is editing pills, not capturing).
+  const handleOpenPills = (tenancyId) => setPillsPickerTenancyId(tenancyId);
+
+  const handlePillsRecordPick = (inspectionId) => {
+    setPillsPickerTenancyId(null);
+    if (onCapture) onCapture(inspectionId);
   };
 
   // ─── PDF generation from bottom sheet ─────────────────────────────────
@@ -314,20 +342,13 @@ export default function PropertyScreen({
     }
   };
 
-  // Handler for "Generate Report (PDF)" — opens sheet, or skips when there's
-  // exactly 1 inspection and 0 attached PDFs (auto-generate the obvious one)
+  // Handler for "Generate Report (PDF)" — always opens the picker sheet so
+  // the user has a consistent surface for selecting records and bundling
+  // PDFs. v0.3.0 used to auto-skip when there was a single inspection, but
+  // that broke the mental model: predictable beats clever. The user can
+  // still tap Generate immediately if they only want the one record.
   const handleGenerateButtonTap = () => {
-    const allInspections = property.tenancies.flatMap(t => t.inspections)
-      .concat(property.betweenInspections || []);
-    const attachedCount = listAttachedPdfs(property).length;
-    if (allInspections.length === 1 && attachedCount === 0) {
-      handleGeneratePdf({
-        inspectionIds: [allInspections[0].id],
-        attachedPdfIds: [],
-      });
-    } else {
-      setPdfPickerSheetOpen(true);
-    }
+    setPdfPickerSheetOpen(true);
   };
 
   // Sort tenancies: active first, then by start date descending
@@ -444,6 +465,7 @@ export default function PropertyScreen({
               onOpenInspection={onCapture}
               onCreateInspection={(typeId, opts) => handleNewInspection(typeId, tenancy.id, opts)}
               onTenancyFindings={onTenancyFindings ? () => onTenancyFindings(tenancy.id) : null}
+              onOpenPills={() => handleOpenPills(tenancy.id)}
             />
           );
         })}
@@ -529,6 +551,14 @@ export default function PropertyScreen({
             setEditingTenancyId(null);
           }}
           onCancel={() => setEditingTenancyId(null)}
+        />
+      )}
+
+      {pillsPickerTenancyId && (
+        <PillsRecordPicker
+          tenancy={property.tenancies.find(t => t.id === pillsPickerTenancyId)}
+          onPick={handlePillsRecordPick}
+          onClose={() => setPillsPickerTenancyId(null)}
         />
       )}
     </div>
@@ -641,6 +671,7 @@ function TenancySection({
   tenancy, property, isActive, isCollapsed,
   onToggleCollapsed, onDeleteTenancy, onEditTenancy,
   onDeleteInspection, onOpenInspection, onCreateInspection, onTenancyFindings,
+  onOpenPills,
 }) {
   const tenantNames = tenancy.tenants?.length > 0 ? tenancy.tenants.join(', ') : '(unnamed tenant)';
 
@@ -739,6 +770,17 @@ function TenancySection({
             />
           )}
 
+          {/* Pills button — opens record picker for editing per-room item statuses.
+              Only shown when there's at least one record in this lease — nothing
+              to edit pills on otherwise. Photo Document main tap creates a record
+              first, so this button surfaces shortly after. */}
+          {onOpenPills && tenancy.inspections.length > 0 && (
+            <button onClick={onOpenPills} style={btnPills}>
+              <span style={{ fontSize: 16 }}>💊</span>
+              <span>Pills · pick a record to edit</span>
+            </button>
+          )}
+
           {sortedInspections.length === 0 ? (
             <div style={{
               fontSize: 12, color: THEME.muted2, padding: '12px 0',
@@ -802,10 +844,12 @@ function TenancySection({
 // ═══════════════════════════════════════════════════════════════════════════
 // PhotoDocumentSplitButton — main button + chevron dropdown
 // ═══════════════════════════════════════════════════════════════════════════
-// Tap main button → create unlabeled "Other: N+1" record, camera opens.
+// Tap main button → create unlabeled "Other: N+1" record, route to PhotoDoc
+//                   grid (new flat-grid surface), camera auto-opens.
 // Tap chevron → dropdown with 5 type options (Baseline, Mid-lease, Post-tenant,
 // Turnover, Other-with-custom-label). Caps preserved on Baseline/Mid-lease/
-// Post-tenant. Turnover and Other are uncapped.
+// Post-tenant. Turnover and Other are uncapped. Chevron picks route to
+// CaptureScreen (per-room items+statuses surface).
 function PhotoDocumentSplitButton({ tenancy, property, onCreate, onOpenExisting }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [otherPromptOpen, setOtherPromptOpen] = useState(false);
@@ -820,11 +864,17 @@ function PhotoDocumentSplitButton({ tenancy, property, onCreate, onOpenExisting 
   };
 
   const handleMainTap = () => {
-    // Default behavior: create an Other:N+1 record immediately and open the
-    // camera right away on the capture screen — main tap is the "I want to
-    // shoot photos right now" shortcut.
+    // Default behavior: create an Other:N+1 record immediately and route to
+    // the PhotoDoc grid surface with the camera auto-opened. Main tap is
+    // the "I want to shoot photos right now" shortcut. The 'photodoc' route
+    // hint tells main.jsx to open PhotoDocGridScreen (flat-grid + paint-mode
+    // tagging) instead of CaptureScreen (per-room items+statuses).
     const n = nextOtherCounter(property);
-    onCreate('other', { label: `Other: ${n}`, autoOpenCamera: true });
+    onCreate('other', {
+      label: `Other: ${n}`,
+      autoOpenCamera: true,
+      route: 'photodoc',
+    });
   };
 
   const handleTypePick = (typeId) => {
@@ -838,6 +888,10 @@ function PhotoDocumentSplitButton({ tenancy, property, onCreate, onOpenExisting 
       if (onOpenExisting) onOpenExisting(existing.id);
       return;
     }
+    // No `route` — defaults to CaptureScreen (per-room items+statuses).
+    // Typed records (Baseline/Mid-lease/Post-tenant/Turnover) are
+    // dispute-grade evidence captures, not fast Photo Documents, so
+    // they belong in the structured CaptureScreen surface.
     onCreate(typeId);
   };
 
@@ -849,6 +903,8 @@ function PhotoDocumentSplitButton({ tenancy, property, onCreate, onOpenExisting 
   const submitOtherLabel = () => {
     const trimmed = otherLabel.trim();
     if (trimmed) {
+      // Custom-labeled Other → CaptureScreen (per-room items+statuses)
+      // since the user picked it intentionally for structured documentation.
       onCreate('other', { label: trimmed });
     } else {
       const n = nextOtherCounter(property);
@@ -996,6 +1052,133 @@ function OtherLabelPrompt({ value, onChange, onSubmit, onCancel }) {
           <button onClick={onCancel} style={{ ...btnSecondary, flex: 1 }}>Cancel</button>
           <button onClick={onSubmit} style={{ ...btnPrimary, flex: 1, marginTop: 0 }}>OK</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PillsRecordPicker — modal listing records in a tenancy for pill editing
+// ═══════════════════════════════════════════════════════════════════════════
+// Shown when the user taps the Pills button on a lease card. Surfaces every
+// record in that lease as a tappable row. Tapping a record routes to
+// CaptureScreen (per-room items+statuses surface) so the user can edit
+// pills, add notes, or capture more photos for that record. The record's
+// type is unchanged — Pills is a re-entry point to existing CaptureScreen
+// behavior, not a type-changing operation.
+function PillsRecordPicker({ tenancy, onPick, onClose }) {
+  if (!tenancy) return null;
+
+  const TYPE_ORDER = {
+    baseline: 0,
+    mid_lease: 1,
+    post_tenant: 2,
+    other: 3,
+    tenant_move_in: 4,
+    tenant_move_out: 5,
+  };
+  const sortedInspections = [...tenancy.inspections].sort((a, b) => {
+    const aOrder = TYPE_ORDER[a.type] ?? 99;
+    const bOrder = TYPE_ORDER[b.type] ?? 99;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    return new Date(a.createdAt) - new Date(b.createdAt);
+  });
+
+  const tenantNames = tenancy.tenants?.length > 0 ? tenancy.tenants.join(', ') : '(unnamed tenant)';
+
+  return (
+    <div style={modalBackdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{
+        background: THEME.paper, borderRadius: 16, padding: 22,
+        maxWidth: 460, width: '100%',
+        border: `2px solid ${THEME.brand}`,
+        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
+        maxHeight: '85vh', display: 'flex', flexDirection: 'column',
+      }}>
+        <div style={{ fontSize: 13, color: THEME.muted, fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+          💊 Pills
+        </div>
+        <div style={{ fontSize: 17, fontWeight: 700, color: THEME.ink, marginBottom: 4 }}>
+          Pick a record to edit
+        </div>
+        <div style={{ fontSize: 11, color: THEME.muted, marginBottom: 14, lineHeight: 1.5 }}>
+          {tenantNames} · Tap a record to open its per-room items and statuses.
+          You can edit pills, add notes, or capture more photos there.
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
+          {sortedInspections.length === 0 ? (
+            <div style={{
+              padding: 24, textAlign: 'center', color: THEME.muted2,
+              fontSize: 13, fontStyle: 'italic',
+              background: THEME.bg, borderRadius: 10,
+              border: `1px dashed ${THEME.edge}`,
+            }}>
+              No records in this lease yet.<br />
+              Tap <strong style={{ color: THEME.brand }}>+ Photo Document</strong> first.
+            </div>
+          ) : (
+            sortedInspections.map(insp => {
+              const typeEntry = inspectionTypeById(insp.type) || {};
+              const metrics = inspectionMetrics(insp);
+              const ratedPct = metrics.possible > 0
+                ? Math.round((metrics.rated / metrics.possible) * 100)
+                : 0;
+              return (
+                <button
+                  key={insp.id}
+                  onClick={() => onPick(insp.id)}
+                  disabled={!insp.editable}
+                  style={{
+                    background: insp.editable ? THEME.mint50 : THEME.surface,
+                    border: `2px solid ${insp.editable ? THEME.mint300 : THEME.edge}`,
+                    borderRadius: 10, padding: '10px 12px',
+                    cursor: insp.editable ? 'pointer' : 'not-allowed',
+                    display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+                    width: '100%', opacity: insp.editable ? 1 : 0.55,
+                  }}
+                >
+                  <span style={{ fontSize: 18 }}>{typeEntry.icon || '📋'}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{
+                      fontSize: 13, fontWeight: 600, color: THEME.ink,
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                      display: 'flex', alignItems: 'center', gap: 6,
+                    }}>
+                      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {insp.label}
+                      </span>
+                      {!insp.editable && (
+                        <span style={{
+                          fontSize: 9, color: '#fff', background: THEME.tenant,
+                          padding: '2px 5px', borderRadius: 4, fontWeight: 700,
+                          textTransform: 'uppercase', letterSpacing: 0.4, flexShrink: 0,
+                        }}>
+                          R/O
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, color: THEME.muted, marginTop: 2 }}>
+                      {typeEntry.label} · {formatDate(insp.createdAt)} · 📸 {metrics.photos}
+                    </div>
+                  </div>
+                  {metrics.possible > 0 && (
+                    <div style={{
+                      fontSize: 10, color: THEME.brand, background: '#fff',
+                      padding: '3px 9px', borderRadius: 999, fontWeight: 700,
+                      border: `1.5px solid ${THEME.brand2}`,
+                      flexShrink: 0,
+                    }}>
+                      {ratedPct}%
+                    </div>
+                  )}
+                </button>
+              );
+            })
+          )}
+        </div>
+
+        <button onClick={onClose} style={btnSecondary}>Cancel</button>
       </div>
     </div>
   );
@@ -1729,6 +1912,19 @@ const splitChevronBtn = {
   borderTopLeftRadius: 0, borderBottomLeftRadius: 0,
   padding: '14px 18px', fontSize: 16, fontWeight: 700, cursor: 'pointer',
   borderLeft: `1px solid ${THEME.mint600}`,
+};
+
+// ─── Pills button (lease card) ────────────────────────────────────────────
+// Sits between Photo Document split button and the Tenancy Findings button.
+// Mint-tinted to read as a "scoped re-entry" action — distinct from the
+// brand-green primary actions (Photo Document, Findings).
+const btnPills = {
+  background: THEME.mint50, color: THEME.brand,
+  border: `2px solid ${THEME.mint300}`, borderRadius: 12,
+  padding: '12px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+  width: '100%',
+  marginBottom: 10,
+  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
 };
 
 // ─── Type dropdown options ────────────────────────────────────────────────
