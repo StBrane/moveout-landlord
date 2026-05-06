@@ -184,6 +184,38 @@ export default function CaptureScreen({
     openCam();
   };
 
+  const dismissPhotoPrimer = () => {
+    markPhotoPrimerSeen();
+    setPhotoPrimer(false);
+    openCam();
+  };
+
+  const openCam = async () => {
+    setCamOpen(true);
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing, width: { ideal: 1920 } },
+      });
+      setStream(s);
+    } catch (err) {
+      setCamOpen(false);
+      // Mirror the tenant app's behavior: getUserMedia is the only camera
+      // entry point, no Capacitor plugin involved. On native, denied means
+      // the OS won't re-prompt — the user has to fix it in Settings. We
+      // surface that via an in-app modal rather than a bare alert.
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setPermissionDenied(true);
+      } else if (err.name === 'NotFoundError' || err.name === 'OverconstrainedError') {
+        alert('No camera found on this device.');
+      } else {
+        alert('Camera unavailable: ' + (err.message || 'unknown error'));
+      }
+    }
+  };
+
+  // Permission-denied modal state — replaces the original bare alert.
+  const [permissionDenied, setPermissionDenied] = useState(false);
+
   // Auto-open camera on mount when entering from "+ Photo Document" main tap.
   // Only fires once per inspection id, and only if the inspection is brand
   // new (no photos yet in the active room slot) — guards against re-triggering
@@ -194,102 +226,11 @@ export default function CaptureScreen({
     if (autoOpenAttemptedRef.current) return;
     if (!inspection || !inspection.editable) return;
     const photos = inspection.rooms?.[activeRoomId]?.[slot]?.photos || [];
-    if (photos.length > 0) return;  // user came back to existing record — don't hijack
+    if (photos.length > 0) return;
     autoOpenAttemptedRef.current = true;
     requestOpenCam();
   }, [autoOpenCamera, inspection?.id]);
 
-  const dismissPhotoPrimer = () => {
-    markPhotoPrimerSeen();
-    setPhotoPrimer(false);
-    openCam();
-  };
-
-  const openCam = async () => {
-    setCamOpen(true);
-
-    // Native: check + request camera permission via Capacitor first. This
-    // avoids the situation where getUserMedia immediately rejects with
-    // NotAllowedError on iOS/Android because the OS denied state is sticky.
-    // Only if permission is permanently denied do we fall through to the
-    // "open settings" UI — and we provide a button to open settings directly
-    // rather than instructing the user to navigate by hand.
-    if (IS_NATIVE) {
-      try {
-        const { Camera } = await import('@capacitor/camera');
-        let perm = await Camera.checkPermissions();
-        // States: 'granted' | 'denied' | 'prompt' | 'prompt-with-rationale' | 'limited'
-        if (perm.camera !== 'granted' && perm.camera !== 'limited') {
-          if (perm.camera === 'denied') {
-            // Already permanently denied — ask getUserMedia anyway in case
-            // OS state has been updated since last check, but if it fails
-            // we'll surface the settings-open dialog.
-          } else {
-            const requested = await Camera.requestPermissions({ permissions: ['camera'] });
-            if (requested.camera !== 'granted' && requested.camera !== 'limited') {
-              setCamOpen(false);
-              setPermissionDenied(true);
-              return;
-            }
-          }
-        }
-      } catch (e) {
-        // @capacitor/camera not available or threw — fall through to
-        // getUserMedia, which has its own error path. This keeps web working.
-        console.warn('Camera permission check skipped:', e?.message || e);
-      }
-    }
-
-    try {
-      const s = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facing, width: { ideal: 1920 } },
-      });
-      setStream(s);
-    } catch (err) {
-      setCamOpen(false);
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setPermissionDenied(true);
-      } else {
-        alert('Camera unavailable: ' + (err.message || 'unknown error'));
-      }
-    }
-  };
-
-  // Permission-denied modal state — shown instead of a bare alert. Lets the
-  // user open app settings with one tap on native.
-  const [permissionDenied, setPermissionDenied] = useState(false);
-
-  const openAppSettings = async () => {
-    setPermissionDenied(false);
-    if (!IS_NATIVE) return;
-    try {
-      // Capacitor doesn't expose a direct openAppSettings on @capacitor/app;
-      // most apps use the @capacitor-community/app-settings plugin or
-      // platform-specific code. We try the most common availability paths
-      // and fall back to a clear message if neither works.
-      try {
-        const mod = await import('capacitor-native-settings');
-        await mod.NativeSettings.open({
-          optionAndroid: 'application_details',
-          optionIOS: 'app',
-        });
-        return;
-      } catch (_) { /* plugin not installed */ }
-
-      try {
-        const { App } = await import('@capacitor/app');
-        // @capacitor/app's openUrl can launch app-settings: on iOS
-        if (Capacitor.getPlatform() === 'ios') {
-          await App.openUrl({ url: 'app-settings:' });
-          return;
-        }
-      } catch (_) { /* fall through */ }
-
-      alert('Open your device Settings → Apps → MoveOut Shield Landlord → Permissions → Camera to enable.');
-    } catch (e) {
-      alert('Could not open settings automatically. Please open Settings → Apps → MoveOut Shield Landlord → Permissions → Camera.');
-    }
-  };
 
   // Wire stream to video element when both are ready
   useEffect(() => {
@@ -654,7 +595,7 @@ export default function CaptureScreen({
       {/* ─── Camera permission denied modal ───────────────────────────── */}
       {permissionDenied && (
         <PermissionDeniedModal
-          onOpenSettings={openAppSettings}
+          onRetry={() => { setPermissionDenied(false); openCam(); }}
           onDismiss={() => setPermissionDenied(false)}
         />
       )}
@@ -739,6 +680,46 @@ function CameraOverlay({ videoRef, flash, onClose, onFlip, onSnap, phaseLabel, r
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// PermissionDeniedModal — shown when getUserMedia rejects with NotAllowedError
+// (camera permission denied, either just-now or permanently in the OS).
+// Replaces the bare alert from earlier versions with an in-app modal that
+// includes a Retry button and a clear explanation of where to enable access.
+// No native plugins are used — keeping the dependency surface flat.
+// ═══════════════════════════════════════════════════════════════════════════
+function PermissionDeniedModal({ onRetry, onDismiss }) {
+  return (
+    <div style={modalBackdrop}>
+      <div style={{
+        background: THEME.paper, borderRadius: 16, padding: 24,
+        maxWidth: 420, width: '100%',
+        border: `2px solid ${THEME.danger}`,
+        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
+      }}>
+        <div style={{ fontSize: 32, marginBottom: 8, textAlign: 'center' }}>📷</div>
+        <div style={{ fontSize: 17, fontWeight: 700, color: THEME.danger, marginBottom: 10, textAlign: 'center' }}>
+          Camera access is off
+        </div>
+        <div style={{ fontSize: 13, color: THEME.inkSoft, marginBottom: 14, lineHeight: 1.5 }}>
+          MoveOut Shield Landlord needs camera access to capture inspection photos.
+        </div>
+        <div style={{ fontSize: 12, color: THEME.muted, marginBottom: 18, lineHeight: 1.5 }}>
+          If you just declined the prompt, tap Retry. Otherwise, open
+          <strong> Settings → MoveOut Shield Landlord → Camera</strong> and turn it on,
+          then come back and tap Retry.
+        </div>
+        <button onClick={onRetry} style={{ ...btnPrimary, width: '100%', marginBottom: 8 }}>
+          Retry
+        </button>
+        <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>
+          Not now
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PhotoPrimer — explains why we want Photos library access on iOS
 // ═══════════════════════════════════════════════════════════════════════════
 function PhotoPrimer({ onContinue }) {
@@ -771,44 +752,9 @@ function PhotoPrimer({ onContinue }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PermissionDeniedModal — shown when the OS has permanently denied camera
-// access. Replaces the bare "go to Settings" alert with a tap-to-open flow.
-// ═══════════════════════════════════════════════════════════════════════════
-function PermissionDeniedModal({ onOpenSettings, onDismiss }) {
-  return (
-    <div style={modalBackdrop}>
-      <div style={{
-        background: THEME.paper, borderRadius: 16, padding: 24,
-        maxWidth: 420, width: '100%',
-        border: `2px solid ${THEME.danger}`,
-        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
-      }}>
-        <div style={{ fontSize: 32, marginBottom: 8, textAlign: 'center' }}>📷</div>
-        <div style={{ fontSize: 17, fontWeight: 700, color: THEME.danger, marginBottom: 10, textAlign: 'center' }}>
-          Camera access is off
-        </div>
-        <div style={{ fontSize: 13, color: THEME.inkSoft, marginBottom: 18, lineHeight: 1.5 }}>
-          MoveOut Shield Landlord needs camera access to capture inspection photos.
-          You previously declined the permission, so iOS/Android won't ask again — you'll
-          need to enable it in Settings.
-        </div>
-        <button onClick={onOpenSettings} style={{ ...btnPrimary, width: '100%', marginBottom: 8 }}>
-          Open Settings
-        </button>
-        <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>
-          Not now
-        </button>
-      </div>
-    </div>
-  );
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Lightbox — full-size photo with metadata, delete option
 // ═══════════════════════════════════════════════════════════════════════════
 function Lightbox({ photo, src, onClose, onDelete }) {
-
   return (
     <div style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)',
