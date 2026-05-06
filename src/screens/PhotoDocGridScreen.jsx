@@ -416,24 +416,24 @@ export default function PhotoDocGridScreen({
       {/* ─── Forest header ──────────────────────────────────────────────── */}
       <header style={{
         background: THEME.brand, color: THEME.mint50,
-        padding: 'calc(env(safe-area-inset-top) + 14px) 18px 18px 18px',
+        padding: 'calc(env(safe-area-inset-top) + 14px) 18px 16px 18px',
         borderBottomLeftRadius: 18, borderBottomRightRadius: 18,
-        marginBottom: 14,
+        marginBottom: 12,
       }}>
         <button onClick={onBack} style={{
           background: 'rgba(255,255,255,0.1)', color: THEME.mint100,
           border: `1px solid ${THEME.mint400}`, borderRadius: 999,
           padding: '6px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-          marginBottom: 12, display: 'inline-flex', alignItems: 'center', gap: 6,
+          marginBottom: 10, display: 'inline-flex', alignItems: 'center', gap: 6,
         }}>
           <span style={{ fontSize: 14 }}>‹</span> {property.name}
         </button>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 26 }}>{typeEntry?.icon || '📝'}</span>
+          <span style={{ fontSize: 24 }}>{typeEntry?.icon || '📝'}</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <h1 style={{
-              margin: 0, fontSize: 18, fontWeight: 700, color: THEME.mint50,
+              margin: 0, fontSize: 17, fontWeight: 700, color: THEME.mint50,
               whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
             }}>
               {inspection.label}
@@ -447,25 +447,75 @@ export default function PhotoDocGridScreen({
         </div>
       </header>
 
-      {/* ─── Empty state ─────────────────────────────────────────────────── */}
+      {/* ─── ACTION BUTTONS AT TOP ──────────────────────────────────────── */}
+      {/* All actions sit above the gallery — Tag rooms / Tag damages / Pills /
+          + More photos / Generate PDF. The user reads "what can I do?" first,
+          then the gallery as evidence below. */}
+      <div style={{
+        padding: '0 14px',
+        display: 'flex', flexDirection: 'column', gap: 8,
+        marginBottom: 14,
+      }}>
+        <button onClick={requestOpenCam} style={btnSecondaryAccent}>
+          + More photos
+        </button>
+
+        <button
+          onClick={() => setSubScreen('tagRooms')}
+          disabled={totalPhotos === 0}
+          style={{
+            ...btnSecondaryAccent,
+            opacity: totalPhotos === 0 ? 0.4 : 1,
+            cursor: totalPhotos === 0 ? 'not-allowed' : 'pointer',
+          }}
+        >
+          {untaggedPhotos > 0
+            ? `Tag rooms (${untaggedPhotos} untagged)`
+            : 'Tag rooms'}
+        </button>
+
+        <button
+          onClick={() => setSubScreen('tagDamages')}
+          disabled={totalPhotos === 0}
+          style={{
+            ...btnSecondaryAccent,
+            opacity: totalPhotos === 0 ? 0.4 : 1,
+            cursor: totalPhotos === 0 ? 'not-allowed' : 'pointer',
+          }}
+        >
+          {flaggedPhotos > 0
+            ? `Tag damages (${flaggedPhotos} flagged)`
+            : 'Tag damages'}
+        </button>
+
+        <button
+          onClick={() => onOpenPills && onOpenPills(inspectionId)}
+          style={btnSecondaryAccent}
+        >
+          🪄 Pills · open per-room editor
+        </button>
+      </div>
+
+      {/* ─── PHOTO GALLERY ──────────────────────────────────────────────── */}
       {totalPhotos === 0 ? (
-        <div style={{ padding: '48px 24px', textAlign: 'center' }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>📷</div>
+        <div style={{ padding: '40px 24px', textAlign: 'center' }}>
+          <div style={{ fontSize: 44, marginBottom: 12, opacity: 0.6 }}>📷</div>
           <div style={{ fontSize: 14, fontWeight: 600, color: THEME.ink, marginBottom: 6 }}>
             No photos yet
           </div>
-          <div style={{ fontSize: 13, color: THEME.muted, marginBottom: 20, lineHeight: 1.6 }}>
-            Tap the camera button below to capture photos for this Photo Document.
+          <div style={{ fontSize: 13, color: THEME.muted, lineHeight: 1.6 }}>
+            Tap <strong>+ More photos</strong> above to start capturing.
           </div>
-          <button onClick={requestOpenCam} style={{
-            ...btnPrimary, width: 'auto', padding: '12px 28px',
-          }}>
-            📷 Open Camera
-          </button>
         </div>
       ) : (
-        <div style={{ padding: '0 14px', marginBottom: 16 }}>
-          {/* ─── Flat photo grid ───────────────────────────────────────── */}
+        <div style={{ padding: '0 14px', marginBottom: 14 }}>
+          <div style={{
+            fontSize: 10, fontWeight: 700, color: THEME.muted,
+            textTransform: 'uppercase', letterSpacing: '0.08em',
+            marginBottom: 6, paddingLeft: 4,
+          }}>
+            Photos
+          </div>
           <div style={{
             display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
             gap: 4, background: THEME.paper,
@@ -530,57 +580,23 @@ export default function PhotoDocGridScreen({
         </div>
       )}
 
-      {/* ─── Sticky bottom action bar ─────────────────────────────────── */}
-      <div style={{
-        padding: '0 14px',
-        display: 'flex', flexDirection: 'column', gap: 8,
-      }}>
-        <button onClick={requestOpenCam} style={btnSecondaryAccent}>
-          + More photos
-        </button>
+      {/* ─── PILLS SUMMARY (bottom — only if rated items or notes exist) ── */}
+      <PillsSummaryBlock
+        inspection={inspection}
+        onOpenPills={onOpenPills}
+        inspectionId={inspectionId}
+      />
 
-        <button
-          onClick={() => setSubScreen('tagRooms')}
-          disabled={totalPhotos === 0}
-          style={{
-            ...btnSecondaryAccent,
-            opacity: totalPhotos === 0 ? 0.4 : 1,
-            cursor: totalPhotos === 0 ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {untaggedPhotos > 0
-            ? `Tag rooms (${untaggedPhotos} untagged)`
-            : 'Tag rooms'}
-        </button>
-
-        <button
-          onClick={() => setSubScreen('tagDamages')}
-          disabled={totalPhotos === 0}
-          style={{
-            ...btnSecondaryAccent,
-            opacity: totalPhotos === 0 ? 0.4 : 1,
-            cursor: totalPhotos === 0 ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {flaggedPhotos > 0
-            ? `Tag damages (${flaggedPhotos} flagged)`
-            : 'Tag damages'}
-        </button>
-
-        <button
-          onClick={() => onOpenPills && onOpenPills(inspectionId)}
-          style={btnSecondaryAccent}
-        >
-          Pills · open per-room editor
-        </button>
-
-        <button onClick={onBack} style={{ ...btnReturn, marginTop: 8 }}>
+      {/* ─── Save & Return — sits under all content as the back-action ──── */}
+      <div style={{ padding: '14px 14px 0 14px' }}>
+        <button onClick={onBack} style={btnReturn}>
           ← Save & Return to Property
         </button>
-      </div>
-
-      <div style={{ textAlign: 'center', fontSize: 10, color: THEME.muted2, marginTop: 14 }}>
-        Auto-saved · changes are kept locally on this device
+        <div style={{
+          textAlign: 'center', fontSize: 10, color: THEME.muted2, marginTop: 10,
+        }}>
+          Auto-saved · changes are kept locally on this device
+        </div>
       </div>
 
       {/* ─── Hidden canvas for snapshot capture ───────────────────────── */}
@@ -628,6 +644,114 @@ export default function PhotoDocGridScreen({
       })()}
     </div>
   );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PillsSummaryBlock — per-room summary of rated items, shown below the gallery
+// ═══════════════════════════════════════════════════════════════════════════
+// Renders only when at least one room has rated items or notes. Each room
+// gets a card with: room icon + name, count of rated items, count of damaged
+// items, count of notes characters. Tapping the card opens the Pills editor
+// (CaptureScreen) for this record so the user can edit pills for any room.
+//
+// Rationale: this gives the user a quick "what's on this record" view from
+// the photodoc grid without having to enter the full Pills editor. Read-only
+// summary; tap to edit.
+function PillsSummaryBlock({ inspection, onOpenPills, inspectionId }) {
+  // Walk every room slot and tally rated/damaged/notes
+  const summary = collectPillsSummary(inspection);
+
+  if (summary.length === 0) {
+    // Don't render anything — no pills work has been done on this record
+    return null;
+  }
+
+  return (
+    <div style={{ padding: '0 14px', marginBottom: 14 }}>
+      <div style={{
+        fontSize: 10, fontWeight: 700, color: THEME.muted,
+        textTransform: 'uppercase', letterSpacing: '0.08em',
+        marginBottom: 6, paddingLeft: 4,
+        display: 'flex', alignItems: 'center', gap: 6,
+      }}>
+        <span>🪄 Pills</span>
+        <span style={{ color: THEME.muted2, fontWeight: 500, textTransform: 'none', letterSpacing: 0 }}>
+          · tap to edit
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {summary.map(row => (
+          <button
+            key={`${row.roomId}_${row.slot}`}
+            onClick={() => onOpenPills && onOpenPills(inspectionId)}
+            style={{
+              background: THEME.paper,
+              border: `1px solid ${row.damaged > 0 ? THEME.danger : THEME.edge}`,
+              borderLeft: `4px solid ${row.damaged > 0 ? THEME.danger : THEME.brand2}`,
+              borderRadius: 10, padding: '10px 12px',
+              cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+              width: '100%',
+            }}
+          >
+            <span style={{ fontSize: 18 }}>{row.icon}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: THEME.ink }}>
+                {row.name}
+              </div>
+              <div style={{ fontSize: 11, color: THEME.muted, marginTop: 2, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <span>
+                  <strong style={{ color: THEME.brand2 }}>{row.rated}</strong>
+                  {' '}{row.rated === 1 ? 'item' : 'items'} rated
+                </span>
+                {row.damaged > 0 && (
+                  <span style={{ color: THEME.danger, fontWeight: 600 }}>
+                    · {row.damaged} damaged
+                  </span>
+                )}
+                {row.hasNotes && (
+                  <span style={{ color: THEME.muted2 }}>· notes</span>
+                )}
+              </div>
+            </div>
+            <span style={{ color: THEME.muted2, fontSize: 14 }}>›</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Walk inspection.rooms → produce one row per (roomId, slot) that has any
+// rated items or notes. Skip rooms with no engagement at all.
+function collectPillsSummary(inspection) {
+  if (!inspection?.rooms) return [];
+  const out = [];
+  for (const room of ROOMS) {
+    const rd = inspection.rooms[room.id];
+    if (!rd) continue;
+    for (const slot of ['moveIn', 'moveOut']) {
+      const phase = rd[slot];
+      if (!phase) continue;
+      const statuses = phase.statuses || {};
+      const ratedKeys = Object.keys(statuses);
+      const ratedCount = ratedKeys.length;
+      const damagedCount = ratedKeys.filter(k => statuses[k] === 'damaged').length;
+      const hasNotes = (phase.notes || '').trim().length > 0;
+      if (ratedCount === 0 && !hasNotes) continue;
+      out.push({
+        roomId: room.id,
+        slot,
+        name: room.name,
+        icon: room.icon,
+        rated: ratedCount,
+        damaged: damagedCount,
+        hasNotes,
+      });
+    }
+  }
+  return out;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
