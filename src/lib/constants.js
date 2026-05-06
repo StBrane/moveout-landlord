@@ -1,13 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // constants.js — shared data tables for the landlord app
 // ═══════════════════════════════════════════════════════════════════════════
-// ROOMS, STATE_LAWS mirror the tenant app exactly. Keep in sync — schema
-// changes require a BUNDLE_SCHEMA version bump.
+// ROOMS, STATE_LAWS mirror the tenant app exactly.
 //
 // INSPECTION_TYPES is landlord-specific. Each type has a `defaultSlot` field
 // that determines whether captured data lands in the moveIn or moveOut slot
 // of the inspection record. This mapping is what lets the diff engine compare
-// landlord baselines against tenant move-outs apples-to-apples.
+// landlord baselines against tenant-side records apples-to-apples — though
+// note that as of v0.3, tenant-side records no longer arrive via .mosinsp
+// import; tenant evidence comes in as attached PDFs at the property level.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ─── STATE DEPOSIT LAWS ─────────────────────────────────────────────────────
@@ -94,7 +95,7 @@ export const STATUS = {
 // `tenancyLink` describes how this type relates to tenancies:
 //   'tenancy'  — belongs to one tenancy
 //   'between'  — lives between tenancies (turnover)
-//   'imported' — created by import pipeline
+//   'imported' — created by import pipeline (DEAD as of v0.3 — kept for shape compat)
 // ────────────────────────────────────────────────────────────────────────────
 export const INSPECTION_TYPES = {
   BASELINE:        { id: 'baseline',        label: 'Baseline',        icon: '📋', editable: true,  source: 'landlord', defaultSlot: 'moveIn',  tenancyLink: 'tenancy',
@@ -106,11 +107,11 @@ export const INSPECTION_TYPES = {
   TURNOVER:        { id: 'turnover',        label: 'Turnover',        icon: '🔄', editable: true,  source: 'landlord', defaultSlot: 'moveOut', tenancyLink: 'between',
                      hint: 'After cleaning and repairs — sets the next tenant\'s baseline' },
   OTHER:           { id: 'other',           label: 'Other',           icon: '📝', editable: true,  source: 'landlord', defaultSlot: 'moveIn',  tenancyLink: 'tenancy',
-                     hint: 'Insurance, contractor, or custom inspection' },
+                     hint: 'Insurance, contractor, ad-hoc property documentation' },
   TENANT_MOVE_IN:  { id: 'tenant_move_in',  label: 'Tenant move-in',  icon: '📥', editable: false, source: 'tenant',   defaultSlot: 'moveIn',  tenancyLink: 'imported',
-                     hint: 'Imported from tenant — read-only' },
+                     hint: 'Imported from tenant — read-only (legacy v0.2 records)' },
   TENANT_MOVE_OUT: { id: 'tenant_move_out', label: 'Tenant move-out', icon: '📤', editable: false, source: 'tenant',   defaultSlot: 'moveOut', tenancyLink: 'imported',
-                     hint: 'Imported from tenant — read-only' },
+                     hint: 'Imported from tenant — read-only (legacy v0.2 records)' },
 };
 
 export const LANDLORD_INSPECTION_TYPES = Object.values(INSPECTION_TYPES).filter(t => t.source === 'landlord');
@@ -150,11 +151,13 @@ export const THEME = {
 };
 
 // ─── BUNDLE / STORAGE CONSTANTS ────────────────────────────────────────────
+// SUPPORTED_BUNDLE_SCHEMA_VERSIONS removed — .mosinsp bundle import dropped
+// in v0.3. Tenant-side reports now arrive as PDFs and attach to the property
+// via property.attachedPdfs (see portfolioStore.js).
 export const PHOTO_ROOT = 'MoveOutShieldLandlord';
-export const STORAGE_KEY_PORTFOLIO = 'mosl_portfolio_v2';   // bumped from v1
+export const STORAGE_KEY_PORTFOLIO = 'mosl_portfolio_v2';
 export const STORAGE_KEY_SETTINGS  = 'mosl_settings_v1';
-export const SUPPORTED_BUNDLE_SCHEMA_VERSIONS = [1];
-export const APP_VERSION = '0.2.0';
+export const APP_VERSION = '0.3.0';
 export const PORTFOLIO_SCHEMA_VERSION = 2;
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
