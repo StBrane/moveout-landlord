@@ -332,13 +332,17 @@ function App() {
   }, [photoStore]);
 
   // ─── Capture navigation helper ───────────────────────────────────────
-  // PropertyScreen's onCapture takes (inspectionId, opts). opts.route can be
-  // 'photodoc' (new flat-grid flow for Other:N records from main + Photo
-  // Document tap) or omitted (existing CaptureScreen for typed records,
-  // Pills picks, and edits to existing records).
+  // v0.3.0+ unified flow: every record routes to PhotoDocGridScreen by
+  // default (the canonical post-capture surface). Only the Pills button on
+  // a lease card or the Pills entry inside PhotoDocGridScreen routes to
+  // CaptureScreen — explicitly via opts.route='capture'. Anywhere else
+  // (Photo Document picker, inspection-card tap, attached-record open,
+  // Property Photos canonical record), the user lands on the flat-grid
+  // photodoc surface with Tag Rooms / Tag Damages / Pills / Generate PDF
+  // all reachable from there.
   const handleCapture = useCallback((inspectionId, opts = {}) => {
     const cam = opts.autoOpenCamera ? '?cam=1' : '';
-    const screen = opts.route === 'photodoc' ? 'photodoc' : 'capture';
+    const screen = opts.route === 'capture' ? 'capture' : 'photodoc';
     navigate(`/${screen}/${route.propertyId}/${inspectionId}${cam}`);
   }, [route.propertyId]);
 
