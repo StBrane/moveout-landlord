@@ -1,29 +1,36 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // PropertyScreen.jsx — single property view with tenancies and inspections
-// v0.2.0 — major rewrite
+// v0.3.0 — Photo Document split button, property-level PDF attach, bottom-sheet picker
 // ═══════════════════════════════════════════════════════════════════════════
 // Layout:
 //   Header (forest green, big tap-target back button)
 //   Property metadata
-//   Persistent picker / catalog (always visible, doubles as access point)
-//     - "+ New Inspection" → expand type list inline
-//     - Type buttons: Baseline / Mid-lease / Post-tenant / Turnover / Other
-//     - "Tenant's Report" button (manual file picker fallback)
+//   Top row: + Property Photos (left) | + Import PDF (right)
+//   + New Lease button
 //   Tenancy sections (most recent first)
 //     - Active tenancy: expanded
 //     - Past tenancies: collapsible
-//     - Each shows tenant info, dates, rent, deposit, then inspection cards
-//   "Between tenancies" bucket for turnover inspections
-//   Bottom anchor row (always visible at end of scroll):
-//     - Compare Inspections (multi-select up to 3)
-//     - Generate Report (PDF) — disabled in v0.2.0, wired in Patch B
+//     - Each shows tenant info, dates, rent, deposit, then:
+//       - + Photo Document split button (main + chevron dropdown)
+//       - List of inspections (tap to open, × to delete)
+//       - View Tenancy Findings button (if eligible)
+//   "Between tenancies" bucket for turnover + property-level Others
+//   Bottom anchor row:
+//     - Generate Report (PDF) — opens bottom sheet picker
 //     - Return to Portfolio
 //
-// Capture UI is still TODO (Patch B). Tapping a type creates an empty
-// inspection record; user sees a placeholder alert.
+// PDF generation flow:
+//   Tap Generate Report → bottom sheet opens (or skips if 1 inspection + 0 PDFs)
+//   User multi-selects Photo Documents and/or Attached PDFs
+//   Tap Generate PDF → routes to right builder:
+//     1 inspection, 0 PDFs → buildInspectionPDF
+//     2-3, 0 PDFs → buildComparisonPDF (real diff)
+//     4+, 0 PDFs → buildComparisonPDF (evidence bundle, diff suppressed)
+//     anything + PDFs → above + mergePdfs
+//   Output: native uses Filesystem + Share; web triggers download
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { useState, useMemo } from 'react';
+import { useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { Share } from '@capacitor/share';
 import { Filesystem, Directory } from '@capacitor/filesystem';
@@ -35,23 +42,27 @@ import {
 import {
   getProperty, createInspection, deleteInspection,
   createTenancy, deleteTenancy, updateTenancy, flatInspections,
+  attachPdf, detachPdf, listAttachedPdfs, nextOtherCounter,
 } from '../lib/portfolioStore.js';
 import { buildInspectionPDF } from '../lib/pdfBuilder.js';
+import { buildComparisonPDF } from '../lib/comparisonPDF.js';
+import { mergePdfs } from '../lib/pdfMerge.js';
 
 const IS_NATIVE = Capacitor.isNativePlatform();
 
 export default function PropertyScreen({
   portfolio, setPortfolio, propertyId,
-  onBack, onCompare, onCapture, onImportTenantReport, onTenancyFindings,
+  onBack, onCompare, onCapture, onTenancyFindings,
+  // onImportPdf is the property-level PDF picker trigger from main.jsx.
+  // Receives { propertyId } and opens the file input. Replaces the old
+  // onImportTenantReport (.mosinsp flow).
+  onImportPdf,
   photoStore,
 }) {
   const property = getProperty(portfolio, propertyId);
 
   const [showNewTenancy, setShowNewTenancy] = useState(false);
   const [pendingInspection, setPendingInspection] = useState(null);
-  // Past tenancies (endDate strictly before today) start collapsed; active
-  // (no endDate, or endDate today/future) starts expanded. Initialized via
-  // lazy state to avoid recomputing on every render.
   const [collapsedTenancies, setCollapsedTenancies] = useState(() => {
     const set = new Set();
     const startOfToday = new Date();
@@ -63,8 +74,8 @@ export default function PropertyScreen({
     }
     return set;
   });
-  const [selected, setSelected] = useState([]);
-  const [showPdfPicker, setShowPdfPicker] = useState(false);
+  const [pdfPickerSheetOpen, setPdfPickerSheetOpen] = useState(false);
+  const [attachedPdfsOpen, setAttachedPdfsOpen] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
   const [editingTenancyId, setEditingTenancyId] = useState(null);
 
@@ -78,10 +89,6 @@ export default function PropertyScreen({
   }
 
   const state = property.stateIdx != null ? STATE_LAWS[property.stateIdx] : null;
-  // A tenancy is "active" if it has no endDate, OR its endDate is today
-  // or in the future. End-of-lease day itself counts as still-active so the
-  // landlord can capture inspections on the day of move-out. The tenancy
-  // becomes "past" the day AFTER endDate (when local clock is past midnight).
   const isTenancyActive = (t) => {
     if (!t?.endDate) return true;
     const startOfToday = new Date();
@@ -89,63 +96,64 @@ export default function PropertyScreen({
     return new Date(t.endDate).getTime() >= startOfToday.getTime();
   };
   const activeTenancy = property.tenancies.find(isTenancyActive) || null;
-  const allInspections = flatInspections(property);
+
+  // Property reference photos: a single growing record at the property level
+  const propertyReferenceRecord = (property.betweenInspections || [])
+    .find(i => i.type === 'other' && i.label === 'Property reference');
 
   // ─── Inspection creation flow ─────────────────────────────────────────
-  // The picker is now per-tenancy (or per-between-tenancies for turnover),
-  // so callers always know what tenancy they're targeting. No fallback to
-  // activeTenancy needed.
-  //
-  //   tenancyId: string for tenancy-linked types
-  //   tenancyId: null for turnover (lives on property.betweenInspections)
-  const handleNewInspection = (typeId, tenancyId) => {
+  // Now accepts an optional `opts` object with a custom `label` to override
+  // the type's default label. Used by the Photo Document split button to
+  // pass user-typed Other labels and auto-numbered Other:N labels.
+  const handleNewInspection = (typeId, tenancyId, opts = {}) => {
     const typeEntry = inspectionTypeById(typeId);
     if (!typeEntry) return;
-    doCreateInspection(typeId, typeEntry.tenancyLink === 'between' ? null : tenancyId);
+    doCreateInspection(typeId, typeEntry.tenancyLink === 'between' ? null : tenancyId, opts);
   };
 
-  // ─── Top "+ New Lease" button handler ──────────────────────────────────
-  // Always opens the new-tenancy modal. If there's an active tenancy, the
-  // modal will offer to end it today as part of the new-lease creation flow.
-  const handleNewLease = () => {
-    setShowNewTenancy(true);
-  };
+  const handleNewLease = () => setShowNewTenancy(true);
 
-  const doCreateInspection = (typeId, tenancyId) => {
+  const doCreateInspection = (typeId, tenancyId, opts = {}) => {
     const typeEntry = inspectionTypeById(typeId);
-    // Use the type's default label directly. The prompt was friction without
-    // payoff — landlords don't need a custom label per inspection. If we ever
-    // need uniqueness, the date stamp on the card already disambiguates.
+    const label = opts.label || typeEntry.label;
     const { portfolio: next, inspection } = createInspection(portfolio, propertyId, {
       typeId,
-      label: typeEntry.label,
+      label,
       tenancyId,
     });
     setPortfolio(next);
-
-    // Navigate to the capture screen so the landlord can immediately walk
-    // through the rooms. The inspection record is already persisted, so
-    // backing out at any point preserves what they've entered (auto-save
-    // continues to fire from CaptureScreen).
     if (onCapture) onCapture(inspection.id);
   };
 
+  // ─── Property Photos (canonical reference gallery) ────────────────────
+  // First tap creates a "Property reference" record in betweenInspections
+  // (no tenancyId) and routes to capture. Subsequent taps open that same
+  // record so the user can add more shots — one canonical gallery, not
+  // per-session slices.
+  const handleAddPropertyPhotos = () => {
+    if (propertyReferenceRecord) {
+      if (onCapture) onCapture(propertyReferenceRecord.id);
+      return;
+    }
+    const { portfolio: next, inspection } = createInspection(portfolio, propertyId, {
+      typeId: 'other',
+      label: 'Property reference',
+      tenancyId: null,
+    });
+    setPortfolio(next);
+    if (onCapture) onCapture(inspection.id);
+  };
+
+  const handleOpenPropertyPhotos = () => {
+    if (propertyReferenceRecord && onCapture) {
+      onCapture(propertyReferenceRecord.id);
+    }
+  };
+
   // ─── New tenancy creation ─────────────────────────────────────────────
-  // Two flows hit this:
-  //   1. User tapped "+ New Lease" with no pending inspection — just create
-  //      the tenancy and stay on the property screen.
-  //   2. User tapped a type (Baseline etc.) with no active tenancy — pending
-  //      inspection was queued. Create tenancy AND inspection in one mutation
-  //      chain to avoid stale-state bug, then navigate to capture.
-  //
-  // If form.endActiveLeaseToday is true (modal offered this when an active
-  // tenancy existed), we set the active tenancy's endDate to today before
-  // creating the new tenancy. Both mutations happen in one chain so a single
-  // setPortfolio commits the result.
   const handleCreateTenancy = (form) => {
     let workingPortfolio = portfolio;
 
-    // Optionally auto-end the currently-active tenancy
     if (form.endActiveLeaseToday && activeTenancy) {
       const today = new Date().toISOString().slice(0, 10);
       workingPortfolio = updateTenancy(workingPortfolio, propertyId, activeTenancy.id, {
@@ -165,8 +173,6 @@ export default function PropertyScreen({
     setShowNewTenancy(false);
 
     if (pendingInspection) {
-      // Create the inspection against the freshly-mutated portfolio (NOT
-      // the stale `portfolio` from closure). Then commit both at once.
       const { typeId } = pendingInspection;
       setPendingInspection(null);
 
@@ -187,7 +193,6 @@ export default function PropertyScreen({
     if (!confirm(`Delete "${label}"? This cannot be undone.`)) return;
     setPortfolio(deleteInspection(portfolio, propertyId, inspId));
     if (photoStore) await photoStore.removeInspection(inspId);
-    setSelected(selected.filter(id => id !== inspId));
   };
 
   const handleDeleteTenancy = (tenancyId, tenants) => {
@@ -202,81 +207,125 @@ export default function PropertyScreen({
     setCollapsedTenancies(next);
   };
 
-  // ─── Compare selection (up to 3) ──────────────────────────────────────
-  const toggleSelect = (inspId) => {
-    if (selected.includes(inspId)) {
-      setSelected(selected.filter(id => id !== inspId));
-    } else if (selected.length < 3) {
-      setSelected([...selected, inspId]);
-    } else {
-      // Drop oldest, add new
-      setSelected([selected[1], selected[2], inspId]);
-    }
-  };
-
-  // ─── PDF export ────────────────────────────────────────────────────────
-  // Builds the inspection report PDF and routes it through the right
-  // delivery mechanism for the platform:
-  //   - native: write to Directory.Cache, then Share.share() with the URI
-  //   - web: doc.save() triggers browser download
-  const handleExportPDF = async (inspId) => {
-    const inspection = property.tenancies
-      .flatMap(t => t.inspections)
-      .concat(property.betweenInspections || [])
-      .find(i => i.id === inspId);
-    if (!inspection) {
-      alert('Inspection not found.');
-      return;
-    }
-    const tenancy = property.tenancies.find(t => t.id === inspection.tenancyId) || null;
-
+  // ─── PDF generation from bottom sheet ─────────────────────────────────
+  // Picks the right builder based on what's selected:
+  //   1 inspection, 0 PDFs → buildInspectionPDF
+  //   2-3, 0 PDFs → buildComparisonPDF (real diff)
+  //   4+, 0 PDFs → buildComparisonPDF (evidence bundle, diff suppressed)
+  //   anything + PDFs → above + mergePdfs
+  //   0 inspections + 1+ PDFs → cover page + merged PDFs
+  const handleGeneratePdf = async ({ inspectionIds, attachedPdfIds }) => {
     setPdfBusy(true);
-    setShowPdfPicker(false);
+    setPdfPickerSheetOpen(false);
     try {
-      const doc = await buildInspectionPDF(inspection, property, tenancy, photoStore);
-      const safeName = (property.name || 'Property').replace(/\s+/g, '-').replace(/[^A-Za-z0-9-_]/g, '');
-      const safeLabel = (inspection.label || 'inspection').replace(/\s+/g, '-').replace(/[^A-Za-z0-9-_]/g, '');
-      const date = new Date().toISOString().slice(0, 10);
-      const fileName = `${safeName}-${safeLabel}-${date}.pdf`;
+      const inspections = inspectionIds.map(id => {
+        return property.tenancies
+          .flatMap(t => t.inspections)
+          .concat(property.betweenInspections || [])
+          .find(i => i.id === id);
+      }).filter(Boolean);
 
+      const attachedPdfs = listAttachedPdfs(property).filter(p => attachedPdfIds.includes(p.id));
+
+      let blob;
+      let baseFileName;
+
+      if (inspections.length === 0 && attachedPdfs.length > 0) {
+        // PDFs only — minimal cover page + merged attachments
+        const { jsPDF } = await import('jspdf');
+        const cover = new jsPDF({ unit: 'mm', format: 'letter' });
+        cover.setFillColor(27, 58, 45);
+        cover.rect(0, 0, 215.9, 30, 'F');
+        cover.setTextColor(240, 253, 244);
+        cover.setFontSize(20); cover.setFont('helvetica', 'bold');
+        cover.text('MoveOut Shield Landlord', 18, 13);
+        cover.setFontSize(10); cover.setFont('helvetica', 'normal');
+        cover.text('Attached PDF Bundle', 18, 21);
+        cover.text(property.address || '', 18, 27);
+        cover.text(new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), 215.9 - 18, 21, { align: 'right' });
+        cover.text(property.name || '', 215.9 - 18, 27, { align: 'right' });
+        cover.setTextColor(60, 60, 60);
+        cover.setFontSize(11);
+        cover.text(`${attachedPdfs.length} attached document${attachedPdfs.length === 1 ? '' : 's'}`, 18, 50);
+        attachedPdfs.forEach((pdf, idx) => {
+          cover.text(`${idx + 1}. ${pdf.fileName}${pdf.pageCount ? ` (${pdf.pageCount} pages)` : ''}`, 18, 60 + idx * 6);
+        });
+        blob = await mergePdfs(cover, attachedPdfs, photoStore);
+        baseFileName = `${safeFileName(property.name)}-PDFs-${dateStamp()}.pdf`;
+      } else if (inspections.length === 1 && attachedPdfs.length === 0) {
+        const insp = inspections[0];
+        const tenancy = property.tenancies.find(t => t.id === insp.tenancyId) || null;
+        const doc = await buildInspectionPDF(insp, property, tenancy, photoStore);
+        blob = doc.output('blob');
+        baseFileName = `${safeFileName(property.name)}-${safeFileName(insp.label)}-${dateStamp()}.pdf`;
+      } else if (inspections.length >= 2) {
+        const diff = inspections.length <= 3 ? await buildDiff(inspections) : null;
+        const doc = await buildComparisonPDF(inspections, diff, property, photoStore);
+        blob = await mergePdfs(doc, attachedPdfs, photoStore);
+        const labelHint = inspections.length <= 3 ? 'Comparison' : 'Bundle';
+        baseFileName = `${safeFileName(property.name)}-${labelHint}-${inspections.length}way-${dateStamp()}.pdf`;
+      } else {
+        // 1 inspection + N attached PDFs
+        const insp = inspections[0];
+        const tenancy = property.tenancies.find(t => t.id === insp.tenancyId) || null;
+        const doc = await buildInspectionPDF(insp, property, tenancy, photoStore);
+        blob = await mergePdfs(doc, attachedPdfs, photoStore);
+        baseFileName = `${safeFileName(property.name)}-${safeFileName(insp.label)}-Bundle-${dateStamp()}.pdf`;
+      }
+
+      // Deliver: native uses Filesystem + Share; web triggers download
       if (IS_NATIVE) {
-        // jsPDF returns base64 via output('datauristring'); strip the prefix
-        const dataUri = doc.output('datauristring');
-        const base64 = dataUri.split(',')[1];
+        const arrayBuffer = await blob.arrayBuffer();
+        const base64 = arrayBufferToBase64(arrayBuffer);
         await Filesystem.writeFile({
-          path: fileName,
-          data: base64,
-          directory: Directory.Cache,
-          recursive: true,
+          path: baseFileName, data: base64,
+          directory: Directory.Cache, recursive: true,
         });
         const { uri } = await Filesystem.getUri({
-          path: fileName,
-          directory: Directory.Cache,
+          path: baseFileName, directory: Directory.Cache,
         });
         try {
           await Share.share({
-            title: `Inspection — ${inspection.label}`,
-            text: `${property.name}\n${inspection.label}`,
+            title: `Report — ${property.name}`,
+            text: property.name,
             url: uri,
-            dialogTitle: 'Share Inspection Report',
+            dialogTitle: 'Share Report',
           });
         } catch (e) {
-          // User cancelled — swallow
           const msg = String(e?.message || '');
           if (!msg.includes('cancel') && !msg.includes('abort') && !msg.includes('dismiss')) throw e;
         }
       } else {
-        doc.save(fileName);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = baseFileName;
+        document.body.appendChild(a); a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
       }
     } catch (e) {
-      console.error('PDF export failed:', e);
-      alert('PDF export failed: ' + (e?.message || 'unknown error'));
+      console.error('PDF generation failed:', e);
+      alert('PDF generation failed: ' + (e?.message || 'unknown error'));
     } finally {
       setPdfBusy(false);
     }
   };
 
-  const canCompare = selected.length >= 2;
+  // Handler for "Generate Report (PDF)" — opens sheet, or skips when there's
+  // exactly 1 inspection and 0 attached PDFs (auto-generate the obvious one)
+  const handleGenerateButtonTap = () => {
+    const allInspections = property.tenancies.flatMap(t => t.inspections)
+      .concat(property.betweenInspections || []);
+    const attachedCount = listAttachedPdfs(property).length;
+    if (allInspections.length === 1 && attachedCount === 0) {
+      handleGeneratePdf({
+        inspectionIds: [allInspections[0].id],
+        attachedPdfIds: [],
+      });
+    } else {
+      setPdfPickerSheetOpen(true);
+    }
+  };
 
   // Sort tenancies: active first, then by start date descending
   const sortedTenancies = [...property.tenancies].sort((a, b) => {
@@ -288,6 +337,12 @@ export default function PropertyScreen({
     const bStart = new Date(b.startDate || 0).getTime();
     return bStart - aStart;
   });
+
+  const inspectionCount =
+    property.tenancies.reduce((s, t) => s + t.inspections.length, 0) +
+    (property.betweenInspections?.length || 0);
+  const hasInspections = inspectionCount > 0;
+  const hasAttachedPdfs = listAttachedPdfs(property).length > 0;
 
   return (
     <div style={{
@@ -337,34 +392,34 @@ export default function PropertyScreen({
 
       <div style={{ padding: '0 16px' }}>
 
-        {/* ─── Top action: + New Lease ───────────────────────────────────
-            Single property-level action. Import Tenant's Report now lives
-            inside each lease's picker (since landlord knows which lease
-            they want to import to — the bundle's date confirms or overrides).
-        ──────────────────────────────────────────────────────────────────*/}
+        {/* ─── Top row: Property Photos + Import PDF ─────────────────────── */}
+        <PropertyTopRow
+          property={property}
+          propertyReferenceRecord={propertyReferenceRecord}
+          onAddPropertyPhotos={handleAddPropertyPhotos}
+          onOpenPropertyPhotos={handleOpenPropertyPhotos}
+          onImportPdf={() => onImportPdf && onImportPdf({ propertyId })}
+          attachedCount={listAttachedPdfs(property).length}
+          onOpenAttachedPdfs={() => setAttachedPdfsOpen(true)}
+        />
+
+        {/* ─── + New Lease ───────────────────────────────────────────────*/}
         <div style={{ marginBottom: 16 }}>
           <button onClick={handleNewLease} style={btnNewLease}>
             + New Lease
           </button>
         </div>
 
-        {/* ─── Empty state ────────────────────────────────────────────────
-            Only shows when the property has NO tenancies. "Between Tenancies"
-            isn't relevant here — that section only appears when a turnover
-            inspection exists, and you can't make turnovers before having
-            any tenancy at all (well, you can, but the empty state assumes
-            normal flow).
-        ──────────────────────────────────────────────────────────────────*/}
-        {property.tenancies.length === 0 && property.betweenInspections.length === 0 && (
+        {/* ─── Empty state ────────────────────────────────────────────────*/}
+        {property.tenancies.length === 0 && (property.betweenInspections || []).length === 0 && (
           <div style={emptyState}>
             <div style={{ fontSize: 32, marginBottom: 6 }}>🔑</div>
             <div style={{ fontSize: 14, fontWeight: 600, color: THEME.ink, marginBottom: 4 }}>
               No leases yet
             </div>
             <div>
-              Tap <strong style={{ color: THEME.brand }}>+ New Lease</strong> above to start your first one.
-              You'll be prompted for tenant names, rent, and deposit, then can
-              immediately walk through and capture a baseline inspection.
+              Tap <strong style={{ color: THEME.brand }}>+ New Lease</strong> above to start your first one,
+              or capture <strong style={{ color: THEME.brand }}>+ Property Photos</strong> to set a canonical reference state.
             </div>
           </div>
         )}
@@ -384,11 +439,8 @@ export default function PropertyScreen({
               onEditTenancy={() => setEditingTenancyId(tenancy.id)}
               onDeleteInspection={handleDeleteInspection}
               onOpenInspection={onCapture}
-              onCreateInspection={(typeId) => handleNewInspection(typeId, tenancy.id)}
-              onImportTenantReport={() => onImportTenantReport({ tenancyId: tenancy.id, propertyId })}
+              onCreateInspection={(typeId, opts) => handleNewInspection(typeId, tenancy.id, opts)}
               onTenancyFindings={onTenancyFindings ? () => onTenancyFindings(tenancy.id) : null}
-              selected={selected}
-              onToggleSelect={toggleSelect}
             />
           );
         })}
@@ -398,8 +450,6 @@ export default function PropertyScreen({
             inspections={property.betweenInspections}
             onDeleteInspection={handleDeleteInspection}
             onOpenInspection={onCapture}
-            selected={selected}
-            onToggleSelect={toggleSelect}
           />
         )}
 
@@ -407,81 +457,21 @@ export default function PropertyScreen({
         <div style={{
           marginTop: 24, display: 'flex', flexDirection: 'column', gap: 10,
         }}>
-          {(() => {
-            // Build smart compare button label based on which tenancies the selected
-            // inspections belong to. Helps the landlord understand what they're about
-            // to do — within a tenancy ("did this tenant cause damage?") vs across
-            // tenancies ("is this damage chronic?").
-            let label;
-            if (selected.length === 0) {
-              label = 'Compare Inspections — pick 2 or 3';
-            } else if (selected.length === 1) {
-              label = '1 selected — pick 1 or 2 more';
-            } else {
-              // Find which tenancy each selected inspection belongs to.
-              // Returns null for between-tenancies (turnover) inspections.
-              const tenancyIds = selected.map(inspId => {
-                for (const t of property.tenancies) {
-                  if (t.inspections.some(i => i.id === inspId)) return t.id;
-                }
-                return null;  // belongs to betweenInspections
-              });
-              const distinctTenancies = new Set(tenancyIds);
-
-              if (selected.length === 3) {
-                label = 'Compare 3 inspections →';
-              } else if (distinctTenancies.size === 1 && tenancyIds[0] !== null) {
-                // Both within the same tenancy
-                const tenancy = property.tenancies.find(t => t.id === tenancyIds[0]);
-                const tenantNames = tenancy?.tenants?.length > 0
-                  ? tenancy.tenants[0].split(' ')[0]   // first name only — keep label short
-                  : 'tenancy';
-                label = `Compare within ${tenantNames}'s tenancy →`;
-              } else {
-                // Spans multiple tenancies, or includes a turnover
-                label = 'Compare across records →';
-              }
-            }
-
-            return (
-              <button
-                disabled={!canCompare}
-                onClick={() => canCompare && onCompare(selected)}
-                style={{
-                  ...btnPrimary,
-                  background: canCompare ? THEME.brand : THEME.surface,
-                  color: canCompare ? THEME.mint50 : THEME.muted,
-                  cursor: canCompare ? 'pointer' : 'not-allowed',
-                }}
-              >
-                {label}
-              </button>
-            );
-          })()}
-
-          {(() => {
-            const inspectionCount =
-              property.tenancies.reduce((s, t) => s + t.inspections.length, 0) +
-              (property.betweenInspections?.length || 0);
-            const hasInspections = inspectionCount > 0;
-            return (
-              <button
-                onClick={() => setShowPdfPicker(true)}
-                disabled={!hasInspections || pdfBusy}
-                style={{
-                  ...btnPdfReport,
-                  cursor: hasInspections && !pdfBusy ? 'pointer' : 'not-allowed',
-                  opacity: hasInspections && !pdfBusy ? 1 : 0.5,
-                }}
-              >
-                {pdfBusy
-                  ? 'Building PDF…'
-                  : hasInspections
-                    ? '📄 Generate Report (PDF)'
-                    : 'Generate Report (PDF) — no inspections yet'}
-              </button>
-            );
-          })()}
+          <button
+            onClick={handleGenerateButtonTap}
+            disabled={(!hasInspections && !hasAttachedPdfs) || pdfBusy}
+            style={{
+              ...btnPdfReport,
+              cursor: ((hasInspections || hasAttachedPdfs) && !pdfBusy) ? 'pointer' : 'not-allowed',
+              opacity: ((hasInspections || hasAttachedPdfs) && !pdfBusy) ? 1 : 0.5,
+            }}
+          >
+            {pdfBusy
+              ? 'Building PDF…'
+              : (hasInspections || hasAttachedPdfs)
+                ? '📄 Generate Report (PDF)'
+                : 'Generate Report (PDF) — nothing to export yet'}
+          </button>
 
           <button onClick={onBack} style={btnReturn}>
             ← Return to Portfolio
@@ -499,11 +489,32 @@ export default function PropertyScreen({
         />
       )}
 
-      {showPdfPicker && (
-        <PdfPickerModal
+      {pdfPickerSheetOpen && (
+        <PdfPickerSheet
           property={property}
-          onPick={handleExportPDF}
-          onCancel={() => setShowPdfPicker(false)}
+          onGenerate={handleGeneratePdf}
+          onClose={() => setPdfPickerSheetOpen(false)}
+          busy={pdfBusy}
+        />
+      )}
+
+      {attachedPdfsOpen && (
+        <AttachedPdfsList
+          property={property}
+          onClose={() => setAttachedPdfsOpen(false)}
+          onDelete={async (pdfId) => {
+            const pdf = listAttachedPdfs(property).find(p => p.id === pdfId);
+            if (!pdf) return;
+            if (!confirm(`Remove "${pdf.fileName}"? The file will be deleted.`)) return;
+            if (IS_NATIVE && pdf.path) {
+              try { await Filesystem.deleteFile({ path: pdf.path, directory: Directory.Data }); } catch {}
+            }
+            setPortfolio(detachPdf(portfolio, propertyId, pdfId));
+          }}
+          onAddMore={() => {
+            setAttachedPdfsOpen(false);
+            if (onImportPdf) onImportPdf({ propertyId });
+          }}
         />
       )}
 
@@ -522,51 +533,115 @@ export default function PropertyScreen({
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TenancySection — renders one tenancy with its inspections
+// Lazy diff helper — pulls damageReport.js dynamically so it's not in the
+// initial render path. Only fires when generating a 2-way or 3-way comparison.
+// ═══════════════════════════════════════════════════════════════════════════
+async function buildDiff(inspections) {
+  const dr = await import('../lib/damageReport.js');
+  if (inspections.length === 2) {
+    return dr.diffInspections(inspections[0], inspections[1]);
+  }
+  if (inspections.length === 3) {
+    return dr.threeWayMatrix(inspections[0], inspections[1], inspections[2]);
+  }
+  return null;
+}
+
+function safeFileName(s) {
+  return (s || 'Report').replace(/\s+/g, '-').replace(/[^A-Za-z0-9-_]/g, '');
+}
+function dateStamp() {
+  return new Date().toISOString().slice(0, 10);
+}
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PropertyTopRow — Property Photos + Import PDF, side by side
+// ═══════════════════════════════════════════════════════════════════════════
+function PropertyTopRow({
+  property,
+  propertyReferenceRecord,
+  onAddPropertyPhotos,
+  onOpenPropertyPhotos,
+  onImportPdf,
+  attachedCount,
+  onOpenAttachedPdfs,
+}) {
+  const photoCount = propertyReferenceRecord?.rooms
+    ? Object.values(propertyReferenceRecord.rooms).reduce(
+        (s, rd) => s + (rd.moveIn?.photos?.length || 0) + (rd.moveOut?.photos?.length || 0),
+        0
+      )
+    : 0;
+
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8,
+      marginBottom: 14,
+    }}>
+      <button
+        onClick={propertyReferenceRecord ? onOpenPropertyPhotos : onAddPropertyPhotos}
+        style={topRowBtnLeft}
+      >
+        {propertyReferenceRecord ? (
+          <>
+            <span style={{ fontSize: 18 }}>🖼️</span>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', minWidth: 0 }}>
+              <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>View Property Photos</span>
+              <span style={{ fontSize: 10, color: THEME.muted, fontWeight: 500 }}>
+                {photoCount} {photoCount === 1 ? 'photo' : 'photos'}
+              </span>
+            </div>
+          </>
+        ) : (
+          <>
+            <span style={{ fontSize: 18 }}>📷</span>
+            <span>+ Property Photos</span>
+          </>
+        )}
+      </button>
+
+      <button
+        onClick={attachedCount > 0 ? onOpenAttachedPdfs : onImportPdf}
+        style={topRowBtnRight}
+      >
+        {attachedCount > 0 ? (
+          <>
+            <span style={{ fontSize: 18 }}>📎</span>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', minWidth: 0 }}>
+              <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Attached PDFs</span>
+              <span style={{ fontSize: 10, color: THEME.muted, fontWeight: 500 }}>
+                {attachedCount} {attachedCount === 1 ? 'file' : 'files'}
+              </span>
+            </div>
+          </>
+        ) : (
+          <>
+            <span style={{ fontSize: 18 }}>📄</span>
+            <span>+ Import PDF</span>
+          </>
+        )}
+      </button>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TenancySection — renders one tenancy with its Photo Document button + records
 // ═══════════════════════════════════════════════════════════════════════════
 function TenancySection({
   tenancy, property, isActive, isCollapsed,
   onToggleCollapsed, onDeleteTenancy, onEditTenancy,
-  onDeleteInspection, onOpenInspection, onCreateInspection, onImportTenantReport, onTenancyFindings,
-  selected, onToggleSelect,
+  onDeleteInspection, onOpenInspection, onCreateInspection, onTenancyFindings,
 }) {
   const tenantNames = tenancy.tenants?.length > 0 ? tenancy.tenants.join(', ') : '(unnamed tenant)';
 
-  // Per-type "is there already one of these?" lookup. Used by the picker
-  // grid below — buttons turn dark-beige + show a "used" affordance once
-  // the corresponding inspection exists. Multi-instance per type is not
-  // allowed at the UI level for the four lifecycle types (one Baseline per
-  // lease, etc.) and tenant report (one bundle per lease).
-  //
-  // Turnover is INTENTIONALLY EXEMPT from the per-type cap because turnovers
-  // live between leases at the property level — there can legitimately be
-  // multiple turnovers across the lifetime of a property (one between each
-  // pair of leases). So `turnover` is always null here, meaning the picker
-  // button stays in the fresh/amber state forever. User can always add
-  // another turnover.
-  //
-  //   existingByType.baseline    → Inspection | null
-  //   existingByType.mid_lease   → Inspection | null
-  //   existingByType.post_tenant → Inspection | null
-  //   existingByType.other       → Inspection | null
-  //   existingByType.turnover    → ALWAYS null (multiple turnovers permitted)
-  //   existingByType.tenant_report → tenant move_in OR move_out within this tenancy, or null
-  const existingByType = {
-    baseline:    tenancy.inspections.find(i => i.type === 'baseline')    || null,
-    mid_lease:   tenancy.inspections.find(i => i.type === 'mid_lease')   || null,
-    post_tenant: tenancy.inspections.find(i => i.type === 'post_tenant') || null,
-    other:       tenancy.inspections.find(i => i.type === 'other')       || null,
-    turnover:    null,
-    tenant_report: tenancy.inspections.find(
-      i => i.type === 'tenant_move_in' || i.type === 'tenant_move_out'
-    ) || null,
-  };
-
-  // Sort inspections by lifecycle order — Baseline first (start of tenancy),
-  // Mid-lease in the middle, Post-tenant near the end, Other catch-all,
-  // imported tenant records last (they're external evidence, not landlord work).
-  // Within types, fall back to creation date so multiple Mid-lease checks stay
-  // chronologically grouped.
+  // Sort inspections by lifecycle order
   const TYPE_ORDER = {
     baseline: 0,
     mid_lease: 1,
@@ -592,10 +667,6 @@ function TenancySection({
       <button
         onClick={onToggleCollapsed}
         style={{
-          // Active leases get a whispered mint wash on the header — enough
-          // visual signal to spot the active one at a glance, low enough
-          // opacity that it doesn't compete with content. Past leases keep
-          // a transparent header so they fully recede.
           background: isActive ? 'rgba(209, 250, 229, 0.35)' : 'transparent',
           border: 'none', cursor: 'pointer',
           width: '100%', padding: 14, textAlign: 'left',
@@ -626,7 +697,7 @@ function TenancySection({
           )}
           <div style={{ fontSize: 11, color: THEME.muted2, marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
             <span>
-              {tenancy.inspections.length} {tenancy.inspections.length === 1 ? 'inspection' : 'inspections'}
+              {tenancy.inspections.length} {tenancy.inspections.length === 1 ? 'record' : 'records'}
             </span>
             {onEditTenancy && (
               <span
@@ -655,116 +726,14 @@ function TenancySection({
       {!isCollapsed && (
         <div style={{ padding: '0 14px 14px 14px' }}>
 
-          {/* ─── Per-tenancy picker ──────────────────────────────────────
-              Six buttons in a uniform 2-column grid:
-                Baseline       | Mid-lease
-                Post-tenant    | Other
-                Turnover       | Tenant report
-
-              All same size. Turnover is amber-styled (between-leases
-              action — different in nature from the four lifecycle types).
-              Tenant report is mint-styled (read-only external evidence).
-              Lifecycle types stay default mint.
-
-              Turnover routes to property.betweenInspections via
-              handleNewInspection's tenancyLink check. Tenant report opens
-              the file picker with this tenancy as the routing-from context;
-              the confirm dialog flags any auto-route mismatch.
-          ─────────────────────────────────────────────────────────────── */}
+          {/* Photo Document split button — replaces the old 6-button picker grid */}
           {onCreateInspection && (
-            <div style={{
-              marginBottom: 12, paddingTop: 6,
-              borderTop: `1px dashed ${THEME.edge}`,
-            }}>
-              <div style={{
-                fontSize: 10, fontWeight: 700, color: THEME.muted,
-                textTransform: 'uppercase', letterSpacing: 0.5,
-                marginTop: 8, marginBottom: 6,
-              }}>
-                Add to this lease:
-              </div>
-              <div style={{
-                display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6,
-              }}>
-                {LANDLORD_INSPECTION_TYPES
-                  .filter(t => t.tenancyLink === 'tenancy')
-                  .map(type => {
-                    const existing = existingByType[type.id];
-                    const used = !!existing;
-                    return (
-                      <button
-                        key={type.id}
-                        onClick={() => {
-                          if (used && onOpenInspection) onOpenInspection(existing.id);
-                          else onCreateInspection(type.id);
-                        }}
-                        style={used ? tenancyPickerBtnUsed : tenancyPickerBtn}
-                        title={used ? `Open existing ${type.label.toLowerCase()}` : `Add ${type.label.toLowerCase()}`}
-                      >
-                        <span style={{ fontSize: 16, lineHeight: 1, opacity: used ? 0.6 : 1 }}>
-                          {type.icon}
-                        </span>
-                        <span style={{ flex: 1, textAlign: 'left' }}>{type.label}</span>
-                        {used && (
-                          <span style={{ fontSize: 10, opacity: 0.7, fontWeight: 700 }}>✓</span>
-                        )}
-                      </button>
-                    );
-                  })
-                }
-
-                {/* Turnover — amber when fresh, dark-beige when one exists.
-                    Note "used" here means a turnover exists ANYWHERE in the
-                    property's betweenInspections (since turnover is property-
-                    level). Tapping the used state opens the most-recent. */}
-                {(() => {
-                  const existing = existingByType.turnover;
-                  const used = !!existing;
-                  return (
-                    <button
-                      onClick={() => {
-                        if (used && onOpenInspection) onOpenInspection(existing.id);
-                        else onCreateInspection('turnover');
-                      }}
-                      style={used ? tenancyPickerBtnUsed : {
-                        ...tenancyPickerBtn,
-                        background: '#FEF3C7', borderColor: '#FDE68A', color: '#92400E',
-                      }}
-                      title={used ? 'Open existing turnover' : 'Add turnover'}
-                    >
-                      <span style={{ fontSize: 16, lineHeight: 1, opacity: used ? 0.6 : 1 }}>🔄</span>
-                      <span style={{ flex: 1, textAlign: 'left' }}>Turnover</span>
-                      {used && <span style={{ fontSize: 10, opacity: 0.7, fontWeight: 700 }}>✓</span>}
-                    </button>
-                  );
-                })()}
-
-                {/* Tenant report — mint-tinted when fresh, dark-beige when one
-                    exists in this tenancy (either move-in OR move-out). Tapping
-                    used state opens the existing imported inspection. */}
-                {(() => {
-                  const existing = existingByType.tenant_report;
-                  const used = !!existing;
-                  return (
-                    <button
-                      onClick={() => {
-                        if (used && onOpenInspection) onOpenInspection(existing.id);
-                        else if (onImportTenantReport) onImportTenantReport();
-                      }}
-                      style={used ? tenancyPickerBtnUsed : {
-                        ...tenancyPickerBtn,
-                        background: THEME.mint100, borderColor: THEME.mint300, color: THEME.brand,
-                      }}
-                      title={used ? 'Open imported tenant report' : 'Import a tenant report'}
-                    >
-                      <span style={{ fontSize: 16, lineHeight: 1, opacity: used ? 0.6 : 1 }}>📥</span>
-                      <span style={{ flex: 1, textAlign: 'left' }}>Import Tenant Report</span>
-                      {used && <span style={{ fontSize: 10, opacity: 0.7, fontWeight: 700 }}>✓</span>}
-                    </button>
-                  );
-                })()}
-              </div>
-            </div>
+            <PhotoDocumentSplitButton
+              tenancy={tenancy}
+              property={property}
+              onCreate={onCreateInspection}
+              onOpenExisting={onOpenInspection}
+            />
           )}
 
           {sortedInspections.length === 0 ? (
@@ -772,7 +741,7 @@ function TenancySection({
               fontSize: 12, color: THEME.muted2, padding: '12px 0',
               textAlign: 'center', fontStyle: 'italic',
             }}>
-              No inspections in this lease yet.
+              No records in this lease yet.
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -780,8 +749,6 @@ function TenancySection({
                 <InspectionCard
                   key={insp.id}
                   inspection={insp}
-                  selected={selected.includes(insp.id)}
-                  onToggleSelect={() => onToggleSelect(insp.id)}
                   onOpen={onOpenInspection ? () => onOpenInspection(insp.id) : null}
                   onDelete={() => onDeleteInspection(insp.id, insp.label)}
                 />
@@ -830,30 +797,228 @@ function TenancySection({
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// BetweenSection — turnover inspections that don't belong to a tenancy
+// PhotoDocumentSplitButton — main button + chevron dropdown
 // ═══════════════════════════════════════════════════════════════════════════
-function BetweenSection({ inspections, onDeleteInspection, onOpenInspection, selected, onToggleSelect }) {
+// Tap main button → create unlabeled "Other: N+1" record, camera opens.
+// Tap chevron → dropdown with 5 type options (Baseline, Mid-lease, Post-tenant,
+// Turnover, Other-with-custom-label). Caps preserved on Baseline/Mid-lease/
+// Post-tenant. Turnover and Other are uncapped.
+function PhotoDocumentSplitButton({ tenancy, property, onCreate, onOpenExisting }) {
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [otherPromptOpen, setOtherPromptOpen] = useState(false);
+  const [otherLabel, setOtherLabel] = useState('');
+
+  // Per-tenancy cap lookup for lifecycle types (Baseline/Mid-lease/Post-tenant)
+  // Other and Turnover are intentionally uncapped — they can stack
+  const existingByType = {
+    baseline:    tenancy.inspections.find(i => i.type === 'baseline')    || null,
+    mid_lease:   tenancy.inspections.find(i => i.type === 'mid_lease')   || null,
+    post_tenant: tenancy.inspections.find(i => i.type === 'post_tenant') || null,
+  };
+
+  const handleMainTap = () => {
+    // Default behavior: create an Other:N+1 record immediately, no dropdown
+    const n = nextOtherCounter(property);
+    onCreate('other', { label: `Other: ${n}` });
+  };
+
+  const handleTypePick = (typeId) => {
+    setDropdownOpen(false);
+    if (typeId === 'other') {
+      setOtherPromptOpen(true);
+      return;
+    }
+    const existing = existingByType[typeId];
+    if (existing) {
+      if (onOpenExisting) onOpenExisting(existing.id);
+      return;
+    }
+    onCreate(typeId);
+  };
+
+  const handleTurnoverPick = () => {
+    setDropdownOpen(false);
+    onCreate('turnover');
+  };
+
+  const submitOtherLabel = () => {
+    const trimmed = otherLabel.trim();
+    if (trimmed) {
+      onCreate('other', { label: trimmed });
+    } else {
+      const n = nextOtherCounter(property);
+      onCreate('other', { label: `Other: ${n}` });
+    }
+    setOtherLabel('');
+    setOtherPromptOpen(false);
+  };
+
+  return (
+    <>
+      <div style={{
+        marginBottom: 12, paddingTop: 8,
+        borderTop: `1px dashed ${THEME.edge}`,
+      }}>
+        <div style={{ display: 'flex', gap: 0, marginTop: 8 }}>
+          <button onClick={handleMainTap} style={splitMainBtn}>
+            + Photo Document
+          </button>
+          <button
+            onClick={() => setDropdownOpen(true)}
+            style={splitChevronBtn}
+            aria-label="Pick inspection type"
+          >
+            ▾
+          </button>
+        </div>
+      </div>
+
+      {dropdownOpen && (
+        <TypeDropdown
+          existingByType={existingByType}
+          onPick={handleTypePick}
+          onPickTurnover={handleTurnoverPick}
+          onClose={() => setDropdownOpen(false)}
+        />
+      )}
+
+      {otherPromptOpen && (
+        <OtherLabelPrompt
+          value={otherLabel}
+          onChange={setOtherLabel}
+          onSubmit={submitOtherLabel}
+          onCancel={() => { setOtherLabel(''); setOtherPromptOpen(false); }}
+        />
+      )}
+    </>
+  );
+}
+
+// ─── Type dropdown for the split button chevron ───────────────────────────
+function TypeDropdown({ existingByType, onPick, onPickTurnover, onClose }) {
+  const tenancyTypes = LANDLORD_INSPECTION_TYPES
+    .filter(t => t.tenancyLink === 'tenancy' && t.id !== 'other');
+
+  return (
+    <div style={modalBackdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{
+        background: THEME.paper, borderRadius: 16, padding: 16,
+        maxWidth: 360, width: '100%',
+        border: `2px solid ${THEME.brand}`,
+        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
+      }}>
+        <div style={{ fontSize: 13, color: THEME.muted, fontWeight: 600, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'center' }}>
+          Pick a type
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {tenancyTypes.map(type => {
+            const existing = existingByType[type.id];
+            const used = !!existing;
+            return (
+              <button
+                key={type.id}
+                onClick={() => onPick(type.id)}
+                style={used ? typeOptionUsed : typeOption}
+                title={used ? `Open existing ${type.label.toLowerCase()}` : `New ${type.label.toLowerCase()}`}
+              >
+                <span style={{ fontSize: 18, lineHeight: 1, opacity: used ? 0.6 : 1 }}>{type.icon}</span>
+                <span style={{ flex: 1, textAlign: 'left' }}>{type.label}</span>
+                {used && <span style={{ fontSize: 11, opacity: 0.7, fontWeight: 700 }}>✓ exists</span>}
+              </button>
+            );
+          })}
+
+          <button
+            onClick={onPickTurnover}
+            style={{ ...typeOption, background: '#FEF3C7', borderColor: '#FDE68A', color: '#92400E' }}
+            title="New turnover"
+          >
+            <span style={{ fontSize: 18, lineHeight: 1 }}>🔄</span>
+            <span style={{ flex: 1, textAlign: 'left' }}>Turnover</span>
+          </button>
+
+          <button
+            onClick={() => onPick('other')}
+            style={typeOption}
+          >
+            <span style={{ fontSize: 18, lineHeight: 1 }}>📝</span>
+            <span style={{ flex: 1, textAlign: 'left' }}>Other (custom label)</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Inline prompt for the "Other" custom label ───────────────────────────
+function OtherLabelPrompt({ value, onChange, onSubmit, onCancel }) {
+  return (
+    <div style={modalBackdrop} onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div style={{
+        background: THEME.paper, borderRadius: 16, padding: 22,
+        maxWidth: 380, width: '100%',
+        border: `2px solid ${THEME.brand}`,
+        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
+      }}>
+        <div style={{ fontSize: 13, color: THEME.muted, fontWeight: 600, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+          Photo Document
+        </div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: THEME.ink, marginBottom: 14 }}>
+          What's this for?
+        </div>
+
+        <input
+          type="text"
+          autoFocus
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') onSubmit(); if (e.key === 'Escape') onCancel(); }}
+          placeholder="new appliance, proof of fix, complaint about noise..."
+          style={{
+            width: '100%', background: THEME.bg, color: THEME.ink,
+            border: `1px solid ${THEME.edge}`, borderRadius: 8,
+            padding: '10px 12px', fontSize: 14, boxSizing: 'border-box', outline: 'none',
+            marginBottom: 12,
+          }}
+        />
+
+        <div style={{ fontSize: 11, color: THEME.muted2, marginBottom: 18, lineHeight: 1.5 }}>
+          Tap OK without typing to use the next "Other: N" number.
+        </div>
+
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button onClick={onCancel} style={{ ...btnSecondary, flex: 1 }}>Cancel</button>
+          <button onClick={onSubmit} style={{ ...btnPrimary, flex: 1, marginTop: 0 }}>OK</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BetweenSection — turnover + property reference + property-level Others
+// ═══════════════════════════════════════════════════════════════════════════
+function BetweenSection({ inspections, onDeleteInspection, onOpenInspection }) {
   const sorted = [...inspections].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   return (
     <div style={{
       marginBottom: 14, background: THEME.paper, borderRadius: 14,
       border: `1px solid ${THEME.edge}`,
-      borderLeftWidth: 4, borderLeftColor: '#D97706',  // amber for between
+      borderLeftWidth: 4, borderLeftColor: '#D97706',
       padding: 14,
     }}>
       <div style={{
         fontSize: 10, fontWeight: 700, color: '#D97706',
         textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 8,
       }}>
-        Between tenancies
+        Property-level records
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {sorted.map(insp => (
           <InspectionCard
             key={insp.id}
             inspection={insp}
-            selected={selected.includes(insp.id)}
-            onToggleSelect={() => onToggleSelect(insp.id)}
             onOpen={onOpenInspection ? () => onOpenInspection(insp.id) : null}
             onDelete={() => onDeleteInspection(insp.id, insp.label)}
           />
@@ -864,45 +1029,25 @@ function BetweenSection({ inspections, onDeleteInspection, onOpenInspection, sel
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// InspectionCard — single inspection row with metric chips
+// InspectionCard — single inspection row, tap to open
 // ═══════════════════════════════════════════════════════════════════════════
-function InspectionCard({ inspection, selected, onToggleSelect, onOpen, onDelete }) {
+function InspectionCard({ inspection, onOpen, onDelete }) {
   const typeEntry = inspectionTypeById(inspection.type) || {};
   const sourceColor = inspection.source === 'tenant' ? THEME.tenant : THEME.landlord;
   const metrics = inspectionMetrics(inspection);
 
   return (
     <div
-      onClick={onToggleSelect}
+      onClick={onOpen}
       style={{
-        // Every inspection card is mint-tinted by default — the visual link
-        // promised by the picker button (which goes dark-beige once an
-        // inspection of this type exists). When selected for compare the
-        // tint deepens slightly and the border thickens to brand-2.
-        background: selected ? THEME.mint100 : THEME.mint50,
+        background: THEME.mint50,
         borderRadius: 10, padding: 10,
-        border: `2px solid ${selected ? THEME.brand2 : THEME.mint300}`,
-        cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10,
+        border: `2px solid ${THEME.mint300}`,
+        cursor: onOpen ? 'pointer' : 'default',
+        display: 'flex', alignItems: 'center', gap: 10,
         transition: 'all 0.1s',
       }}
     >
-      {/* Visible checkbox affordance — tapping the card body still toggles
-          selection, but the checkbox makes the "tap to select for compare"
-          interaction discoverable. */}
-      <div
-        aria-hidden
-        style={{
-          width: 20, height: 20, borderRadius: 6,
-          border: `2px solid ${selected ? THEME.brand2 : THEME.edgeStrong}`,
-          background: selected ? THEME.brand2 : '#fff',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          color: '#fff', fontSize: 13, fontWeight: 900, lineHeight: 1,
-          flexShrink: 0, transition: 'all 0.1s',
-        }}
-      >
-        {selected ? '✓' : ''}
-      </div>
-
       <div style={{
         width: 4, alignSelf: 'stretch', borderRadius: 2, background: sourceColor,
       }} />
@@ -932,7 +1077,6 @@ function InspectionCard({ inspection, selected, onToggleSelect, onOpen, onDelete
         </div>
       </div>
 
-      {/* Metric chips — percentage of items rated within rooms touched, plus photo count */}
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
         {metrics.possible > 0 && (
           <div style={{
@@ -954,21 +1098,6 @@ function InspectionCard({ inspection, selected, onToggleSelect, onOpen, onDelete
         )}
       </div>
 
-      {/* Open button — re-enter capture or view (read-only for tenant imports) */}
-      {onOpen && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onOpen(); }}
-          style={{
-            background: THEME.brand, color: THEME.mint50, border: 'none',
-            borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 600,
-            cursor: 'pointer', whiteSpace: 'nowrap',
-          }}
-          aria-label={inspection.editable ? 'Open inspection' : 'View inspection'}
-        >
-          {inspection.editable ? 'Open' : 'View'}
-        </button>
-      )}
-
       <button
         onClick={(e) => { e.stopPropagation(); onDelete(); }}
         style={{
@@ -982,31 +1111,232 @@ function InspectionCard({ inspection, selected, onToggleSelect, onOpen, onDelete
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PdfPickerModal — picks an inspection to export as PDF
+// PdfPickerSheet — bottom sheet (85% height) for PDF generation
 // ═══════════════════════════════════════════════════════════════════════════
-function PdfPickerModal({ property, onPick, onCancel }) {
-  // Build a flat sorted list with tenancy context labels
-  const items = [];
+// Sticky header + Generate button at top. Scrollable list below with two
+// sections: Photo Documents (multi-select) and Attached PDFs (multi-select).
+// Generate button label adapts to selection. Active when ≥1 selected.
+// Device back button or backdrop tap dismisses.
+function PdfPickerSheet({ property, onGenerate, onClose, busy }) {
+  const [selectedInspections, setSelectedInspections] = useState(new Set());
+  const [selectedPdfs, setSelectedPdfs] = useState(new Set());
+
+  const inspectionItems = [];
   for (const tenancy of property.tenancies) {
     const tenantLabel = tenancy.tenants?.length > 0 ? tenancy.tenants.join(', ') : '(unnamed)';
     for (const insp of tenancy.inspections) {
-      items.push({
-        inspection: insp,
-        tenancyLabel: tenantLabel,
-      });
+      inspectionItems.push({ inspection: insp, tenancyLabel: tenantLabel });
     }
   }
   for (const insp of (property.betweenInspections || [])) {
-    items.push({ inspection: insp, tenancyLabel: 'Between tenancies' });
+    const isPropRef = insp.type === 'other' && insp.label === 'Property reference';
+    inspectionItems.push({
+      inspection: insp,
+      tenancyLabel: isPropRef ? 'Property reference' : 'Property-level',
+    });
   }
-  items.sort((a, b) => new Date(b.inspection.createdAt) - new Date(a.inspection.createdAt));
+  inspectionItems.sort((a, b) => new Date(b.inspection.createdAt) - new Date(a.inspection.createdAt));
+
+  const attachedPdfs = listAttachedPdfs(property);
+
+  const toggleInspection = (id) => {
+    const next = new Set(selectedInspections);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setSelectedInspections(next);
+  };
+  const togglePdf = (id) => {
+    const next = new Set(selectedPdfs);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setSelectedPdfs(next);
+  };
+
+  const totalSelected = selectedInspections.size + selectedPdfs.size;
+  const canGenerate = totalSelected > 0 && !busy;
+
+  // Adaptive button label
+  let buttonLabel = 'Pick at least one';
+  if (selectedInspections.size === 1 && selectedPdfs.size === 0) {
+    const insp = inspectionItems.find(it => selectedInspections.has(it.inspection.id))?.inspection;
+    const photos = insp ? inspectionMetrics(insp).photos : 0;
+    buttonLabel = `Generate PDF — ${insp?.label || ''} (${photos} photos)`;
+  } else if (selectedInspections.size >= 2 && selectedInspections.size <= 3 && selectedPdfs.size === 0) {
+    buttonLabel = `Generate PDF — Comparison (${selectedInspections.size} records)`;
+  } else if (selectedInspections.size > 3 && selectedPdfs.size === 0) {
+    buttonLabel = `Generate PDF — Evidence Bundle (${selectedInspections.size} records)`;
+  } else if (selectedInspections.size === 0 && selectedPdfs.size > 0) {
+    buttonLabel = `Bundle ${selectedPdfs.size} attached PDF${selectedPdfs.size === 1 ? '' : 's'}`;
+  } else if (selectedInspections.size > 0 && selectedPdfs.size > 0) {
+    buttonLabel = `Generate Bundle — ${selectedInspections.size} record${selectedInspections.size === 1 ? '' : 's'} + ${selectedPdfs.size} PDF${selectedPdfs.size === 1 ? '' : 's'}`;
+  }
+
+  if (busy) buttonLabel = 'Building PDF…';
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(28, 25, 23, 0.6)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      zIndex: 1000, padding: 24,
-    }}>
+    <div
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(28, 25, 23, 0.6)',
+        zIndex: 1000, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div style={{
+        background: THEME.paper,
+        borderTopLeftRadius: 18, borderTopRightRadius: 18,
+        height: '85vh', maxHeight: '85vh',
+        display: 'flex', flexDirection: 'column',
+        boxShadow: '0 -10px 40px rgba(0,0,0,0.3)',
+        paddingBottom: 'env(safe-area-inset-bottom)',
+      }}>
+        {/* Sticky header */}
+        <div style={{
+          padding: '14px 18px 10px 18px',
+          borderBottom: `1px solid ${THEME.edge}`,
+          background: THEME.paper,
+          flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+            <div style={{ fontSize: 13, color: THEME.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              Generate Report
+            </div>
+            <div style={{ fontSize: 11, color: THEME.muted2 }}>
+              {totalSelected} selected
+            </div>
+          </div>
+
+          <button
+            disabled={!canGenerate}
+            onClick={() => onGenerate({
+              inspectionIds: [...selectedInspections],
+              attachedPdfIds: [...selectedPdfs],
+            })}
+            style={{
+              ...btnPrimary, width: '100%', marginTop: 6,
+              background: canGenerate ? THEME.brand : THEME.surface,
+              color: canGenerate ? THEME.mint50 : THEME.muted,
+              cursor: canGenerate ? 'pointer' : 'not-allowed',
+            }}
+          >
+            {buttonLabel}
+          </button>
+        </div>
+
+        {/* Scrollable body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px 24px 16px' }}>
+          {inspectionItems.length > 0 && (
+            <>
+              <div style={{ fontSize: 11, fontWeight: 700, color: THEME.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8, marginTop: 4 }}>
+                Photo Documents
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 18 }}>
+                {inspectionItems.map(({ inspection, tenancyLabel }) => {
+                  const typeEntry = inspectionTypeById(inspection.type) || {};
+                  const metrics = inspectionMetrics(inspection);
+                  const isSelected = selectedInspections.has(inspection.id);
+                  return (
+                    <button
+                      key={inspection.id}
+                      onClick={() => toggleInspection(inspection.id)}
+                      style={{
+                        background: isSelected ? THEME.mint100 : THEME.bg,
+                        border: `2px solid ${isSelected ? THEME.brand2 : THEME.edge}`,
+                        borderRadius: 10, padding: '10px 12px', cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+                        width: '100%',
+                      }}
+                    >
+                      <div style={{
+                        width: 20, height: 20, borderRadius: 6,
+                        border: `2px solid ${isSelected ? THEME.brand2 : THEME.edgeStrong}`,
+                        background: isSelected ? THEME.brand2 : '#fff',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        color: '#fff', fontSize: 13, fontWeight: 900, flexShrink: 0,
+                      }}>
+                        {isSelected ? '✓' : ''}
+                      </div>
+                      <span style={{ fontSize: 18 }}>{typeEntry.icon || '📋'}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: THEME.ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {inspection.label}
+                        </div>
+                        <div style={{ fontSize: 11, color: THEME.muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {tenancyLabel} · {formatDate(inspection.createdAt)} · 📸 {metrics.photos}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {attachedPdfs.length > 0 && (
+            <>
+              <div style={{ fontSize: 11, fontWeight: 700, color: THEME.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8, marginTop: 4 }}>
+                Attached PDFs
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {attachedPdfs.map(pdf => {
+                  const isSelected = selectedPdfs.has(pdf.id);
+                  return (
+                    <button
+                      key={pdf.id}
+                      onClick={() => togglePdf(pdf.id)}
+                      style={{
+                        background: isSelected ? THEME.mint100 : THEME.bg,
+                        border: `2px solid ${isSelected ? THEME.brand2 : THEME.edge}`,
+                        borderRadius: 10, padding: '10px 12px', cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+                        width: '100%',
+                      }}
+                    >
+                      <div style={{
+                        width: 20, height: 20, borderRadius: 6,
+                        border: `2px solid ${isSelected ? THEME.brand2 : THEME.edgeStrong}`,
+                        background: isSelected ? THEME.brand2 : '#fff',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        color: '#fff', fontSize: 13, fontWeight: 900, flexShrink: 0,
+                      }}>
+                        {isSelected ? '✓' : ''}
+                      </div>
+                      <span style={{ fontSize: 18 }}>📄</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: THEME.ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {pdf.fileName}
+                        </div>
+                        <div style={{ fontSize: 11, color: THEME.muted, marginTop: 2 }}>
+                          attached {formatDate(pdf.importedAt)}
+                          {pdf.pageCount ? ` · ${pdf.pageCount} pages` : ''}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {inspectionItems.length === 0 && attachedPdfs.length === 0 && (
+            <div style={{
+              padding: 32, textAlign: 'center', color: THEME.muted, fontSize: 13,
+              background: THEME.bg, borderRadius: 10, border: `1px dashed ${THEME.edge}`,
+            }}>
+              No Photo Documents or attached PDFs yet.<br/>
+              Capture a Photo Document or import a PDF to start.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AttachedPdfsList — modal listing attached PDFs with delete + add buttons
+// ═══════════════════════════════════════════════════════════════════════════
+function AttachedPdfsList({ property, onClose, onDelete, onAddMore }) {
+  const pdfs = listAttachedPdfs(property);
+  return (
+    <div style={modalBackdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={{
         background: THEME.paper, borderRadius: 16, padding: 22,
         maxWidth: 460, width: '100%',
@@ -1015,83 +1345,52 @@ function PdfPickerModal({ property, onPick, onCancel }) {
         maxHeight: '85vh', display: 'flex', flexDirection: 'column',
       }}>
         <div style={{ fontSize: 13, color: THEME.muted, fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-          Generate PDF Report
+          Attached PDFs
         </div>
-        <div style={{ fontSize: 18, fontWeight: 700, color: THEME.ink, marginBottom: 4 }}>
-          Pick an inspection
-        </div>
-        <div style={{ fontSize: 12, color: THEME.muted, marginBottom: 16, lineHeight: 1.5 }}>
-          The report covers a single inspection — its rated items, photos, and notes,
-          with the tenancy and property context on the cover.
+        <div style={{ fontSize: 17, fontWeight: 700, color: THEME.ink, marginBottom: 12 }}>
+          {pdfs.length} attached
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
-          {items.length === 0 && (
-            <div style={{
-              padding: 24, textAlign: 'center', color: THEME.muted, fontSize: 12,
-              background: THEME.bg, borderRadius: 10, border: `1px dashed ${THEME.edge}`,
+          {pdfs.map(pdf => (
+            <div key={pdf.id} style={{
+              background: THEME.bg, border: `1px solid ${THEME.edge}`, borderRadius: 10,
+              padding: '10px 12px', display: 'flex', alignItems: 'center', gap: 10,
             }}>
-              No inspections to export yet.
-            </div>
-          )}
-          {items.map(({ inspection, tenancyLabel }) => {
-            const typeEntry = inspectionTypeById(inspection.type) || {};
-            const metrics = inspectionMetrics(inspection);
-            return (
+              <span style={{ fontSize: 18 }}>📄</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: THEME.ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {pdf.fileName}
+                </div>
+                <div style={{ fontSize: 11, color: THEME.muted, marginTop: 2 }}>
+                  {formatDate(pdf.importedAt)}{pdf.pageCount ? ` · ${pdf.pageCount} pages` : ''}
+                </div>
+              </div>
               <button
-                key={inspection.id}
-                onClick={() => onPick(inspection.id)}
+                onClick={() => onDelete(pdf.id)}
                 style={{
-                  background: THEME.bg, color: THEME.ink,
-                  border: `1px solid ${THEME.edge}`, borderRadius: 10,
-                  padding: '11px 12px', fontSize: 13, cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
-                  width: '100%',
+                  background: 'transparent', color: THEME.muted2, border: 'none',
+                  fontSize: 18, cursor: 'pointer', padding: 4, opacity: 0.5, lineHeight: 1,
                 }}
-              >
-                <span style={{ fontSize: 18 }}>{typeEntry.icon || '📋'}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, color: THEME.ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {inspection.label}
-                  </div>
-                  <div style={{ fontSize: 11, color: THEME.muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {tenancyLabel} · {formatDate(inspection.createdAt)}
-                  </div>
-                </div>
-                <div style={{ fontSize: 10, color: THEME.brand2, fontWeight: 700, whiteSpace: 'nowrap' }}>
-                  {metrics.possible > 0 ? `${Math.round((metrics.rated / metrics.possible) * 100)}%` : '—'} · 📸 {metrics.photos}
-                </div>
-              </button>
-            );
-          })}
+                aria-label="Delete attachment"
+              >×</button>
+            </div>
+          ))}
         </div>
 
-        <button onClick={onCancel} style={{
-          background: THEME.surface, color: THEME.ink,
-          border: `1px solid ${THEME.edge}`, borderRadius: 10,
-          padding: '12px 16px', fontSize: 14, fontWeight: 600, cursor: 'pointer',
-          width: '100%',
-        }}>Cancel</button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button onClick={onClose} style={{ ...btnSecondary, flex: 1 }}>Done</button>
+          <button onClick={onAddMore} style={{ ...btnPrimary, flex: 1, marginTop: 0 }}>+ Add More</button>
+        </div>
       </div>
     </div>
   );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NewTenancyModal — collects tenant info before creating a tenancy
+// NewTenancyModal + EditTenancyModal — unchanged from v0.2
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Truncate excess year digits in a YYYY-MM-DD value. Caps year at 4 digits
-// without snapping to any min/max — that pattern caused the v0.3.6 "1990 trap"
-// where intermediate values like "0226-08-15" got clamped to 1990. Now we
-// just slice off anything past the 4th year digit. Backspace still works,
-// so the user can delete and retype freely.
-//
-// Examples:
-//   "2026-08-15"   → "2026-08-15"   (4-digit year, untouched)
-//   "20266-08-15"  → "2026-08-15"   (5+ digits truncated to first 4)
-//   "0226-08-15"   → "0226-08-15"   (intermediate typing, passes through)
-//   ""             → ""             (empty, passes through)
 function clampDate(value) {
   if (!value) return '';
   const m = value.match(/^(\d+)-(\d{2})-(\d{2})$/);
@@ -1100,24 +1399,17 @@ function clampDate(value) {
   return `${year}-${m[2]}-${m[3]}`;
 }
 
-// Strip any non-numeric characters from a money input, allowing one optional
-// decimal point with up to 2 fractional digits. Empty string passes through
-// (lets the user clear the field). Used by rent/deposit text inputs.
 function sanitizeMoney(value) {
   if (!value) return '';
-  // Strip everything except digits and dots
   let cleaned = value.replace(/[^\d.]/g, '');
-  // Keep only the first dot
   const firstDot = cleaned.indexOf('.');
   if (firstDot !== -1) {
     cleaned = cleaned.slice(0, firstDot + 1) + cleaned.slice(firstDot + 1).replace(/\./g, '');
   }
-  // Cap to 2 decimal places
   const dotIdx = cleaned.indexOf('.');
   if (dotIdx !== -1 && cleaned.length - dotIdx - 1 > 2) {
     cleaned = cleaned.slice(0, dotIdx + 3);
   }
-  // Cap at $999,999.99 — sanity guard
   if (parseFloat(cleaned) > 999999.99) {
     cleaned = '999999.99';
   }
@@ -1130,9 +1422,6 @@ function NewTenancyModal({ property, activeTenancy, onCreate, onCancel, pendingT
     startDate: new Date().toISOString().slice(0, 10),
     endDate: '',
     copyFromTurnover: false,
-    // Default to true when an active tenancy exists — most natural case is
-    // "previous tenant moved out, new one moving in." User can uncheck for
-    // sublease / overlap edge cases.
     endActiveLeaseToday: !!activeTenancy,
   });
 
@@ -1265,15 +1554,6 @@ function NewTenancyModal({ property, activeTenancy, onCreate, onCancel, pendingT
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// EditTenancyModal — modify an existing lease's parent record
-// ═══════════════════════════════════════════════════════════════════════════
-// Use case: tenant resigns for another year. Bump endDate forward, save.
-// All inspections within the tenancy stay attached. No effect on data
-// downstream — only the lease metadata changes.
-//
-// Fields editable: tenant names, rent, deposit, startDate, endDate.
-// (Type/source/inspections are immutable — those would be data-shape changes.)
 function EditTenancyModal({ tenancy, onSave, onCancel }) {
   const [form, setForm] = useState({
     tenants: (tenancy.tenants || []).join(', '),
@@ -1383,50 +1663,58 @@ const input = {
   padding: '10px 12px', fontSize: 14, boxSizing: 'border-box', outline: 'none',
 };
 
-// ─── Top-row action buttons ────────────────────────────────────────────────
-// "+ New Lease" and "Import Tenant's Report" — visually distinct from the
-// per-tenancy pickers below. Both forest-themed so they read as primary
-// property-level actions.
 const btnNewLease = {
   background: THEME.brand, color: THEME.mint50, border: 'none', borderRadius: 12,
   padding: '14px 12px', fontSize: 14, fontWeight: 700, cursor: 'pointer',
   width: '100%',
 };
 
-const btnImportTenant = {
+// ─── Top row: Property Photos (left) + Import PDF (right) ─────────────────
+const topRowBtnLeft = {
   background: THEME.mint50, color: THEME.brand,
   border: `2px solid ${THEME.mint300}`, borderRadius: 12,
-  padding: '12px 12px', fontSize: 14, fontWeight: 700, cursor: 'pointer',
-  width: '100%',
+  padding: '14px 12px', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+  display: 'flex', alignItems: 'center', gap: 10,
 };
 
-// ─── Per-tenancy picker buttons ───────────────────────────────────────────
-// Smaller than the top-row buttons since they're nested inside a card.
-// Mint-tinted to signal "tenancy-scoped action" vs the brand-forest of the
-// global property-level actions.
-const tenancyPickerBtn = {
+const topRowBtnRight = {
+  background: THEME.paper, color: THEME.ink,
+  border: `2px solid ${THEME.edgeStrong}`, borderRadius: 12,
+  padding: '14px 12px', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+  display: 'flex', alignItems: 'center', gap: 10,
+};
+
+// ─── Photo Document split button (per lease card) ─────────────────────────
+const splitMainBtn = {
+  flex: 1,
+  background: THEME.brand, color: THEME.mint50,
+  border: 'none', borderTopLeftRadius: 12, borderBottomLeftRadius: 12,
+  borderTopRightRadius: 0, borderBottomRightRadius: 0,
+  padding: '14px 12px', fontSize: 14, fontWeight: 700, cursor: 'pointer',
+};
+
+const splitChevronBtn = {
+  background: THEME.brand2, color: THEME.mint50,
+  border: 'none',
+  borderTopRightRadius: 12, borderBottomRightRadius: 12,
+  borderTopLeftRadius: 0, borderBottomLeftRadius: 0,
+  padding: '14px 18px', fontSize: 16, fontWeight: 700, cursor: 'pointer',
+  borderLeft: `1px solid ${THEME.mint600}`,
+};
+
+// ─── Type dropdown options ────────────────────────────────────────────────
+const typeOption = {
   background: THEME.mint50, color: THEME.brand,
   border: `1px solid ${THEME.mint300}`, borderRadius: 10,
-  padding: '10px 11px', fontSize: 12.5, fontWeight: 600, cursor: 'pointer',
-  display: 'flex', alignItems: 'center', gap: 8,
+  padding: '12px 14px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer',
+  display: 'flex', alignItems: 'center', gap: 10,
 };
 
-// "Used" state for picker buttons — once an inspection of this type exists
-// for this lease, the button transitions to dark-beige with muted text.
-// Tap behavior changes from create→open. Same dimensions as the fresh state
-// so the grid stays uniform; only color shifts.
-// "Used" state for picker buttons — translucent ghost of the original.
-// Once an inspection of this type exists, the button recedes into the
-// background, signaling "you can't make another, but you can tap to open
-// the existing one." Dashed border + low opacity keeps it visible as a
-// tappable target without competing with the still-actionable buttons.
-const tenancyPickerBtnUsed = {
-  background: 'rgba(0, 0, 0, 0.04)',
-  color: THEME.muted2,
-  border: `1px dashed ${THEME.edge}`,
-  borderRadius: 10,
-  padding: '10px 11px', fontSize: 12.5, fontWeight: 500, cursor: 'pointer',
-  display: 'flex', alignItems: 'center', gap: 8,
+const typeOptionUsed = {
+  background: 'rgba(0, 0, 0, 0.04)', color: THEME.muted2,
+  border: `1px dashed ${THEME.edge}`, borderRadius: 10,
+  padding: '12px 14px', fontSize: 13.5, fontWeight: 500, cursor: 'pointer',
+  display: 'flex', alignItems: 'center', gap: 10,
   opacity: 0.7,
 };
 
@@ -1443,8 +1731,6 @@ const btnSecondary = {
   width: '100%',
 };
 
-// Bottom-anchor row buttons — visually distinct from the beige cards
-// surrounding them. Brand-colored so the user can find them at a glance.
 const btnPdfReport = {
   background: THEME.brand2, color: THEME.mint50, border: 'none', borderRadius: 12,
   padding: '14px 18px', fontSize: 14, fontWeight: 600, cursor: 'pointer',
