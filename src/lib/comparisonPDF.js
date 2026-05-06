@@ -1,22 +1,19 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// comparisonPDF.js — generate a side-by-side comparison PDF
+// comparisonPDF.js — generate a side-by-side comparison PDF or evidence bundle
 // ═══════════════════════════════════════════════════════════════════════════
 // Builds the dispute-grade evidence package:
 //
 //   1. Cover page  — property + N inspection cards + summary boxes
-//   2. Per-room diff — item rows with status changes highlighted
-//   3. Notes diff  — only rooms where notes changed
-//   4. Photo galleries at the bottom — one section per inspection
+//   2. Per-room diff — only for 2-way and 3-way comparisons. N>3 evidence
+//      bundles skip the diff body and rely on photo galleries.
+//   3. Photo galleries at the bottom — one section per inspection
 //
 // Public API:
 //   buildComparisonPDF(inspections, diff, property, photoStore) → Promise<jsPDF>
 //
 // `diff` is the output of diffInspections() for 2-way OR a threeWayMatrix
-// from ChangesScreen for 3-way. The function detects which by length.
-//
-// Photo galleries appear AFTER all room diffs, mirroring the user's request:
-// "pics get galleries at the bottom of the page". For 3-way comparisons,
-// each inspection gets its own gallery section.
+// for 3-way. For N>3 evidence bundles, callers pass null — the function
+// detects the count and skips the diff body accordingly.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { jsPDF } from 'jspdf';
@@ -35,8 +32,8 @@ const FOOTER_LIMIT = 272;
 // Brand colors
 const BRAND_RGB = [27, 58, 45];
 const BRAND2_RGB = [43, 106, 79];
-const TENANT_RGB = [30, 64, 175];        // #1E40AF — same as STATUS.clean fg
-const LANDLORD_RGB = [6, 95, 70];        // #065F46 — same as STATUS.fair fg
+const TENANT_RGB = [30, 64, 175];
+const LANDLORD_RGB = [6, 95, 70];
 
 // Status visual treatment (matches STATUS map in constants.js)
 const STATUS_RGB = {
@@ -54,10 +51,10 @@ const STATUS_BG_RGB = {
 
 // Change-type colors for highlighting rows
 const CHANGE_RGB = {
-  worsened: [254, 226, 226],   // pink wash
-  improved: [220, 252, 231],   // mint wash
-  added:    [254, 249, 195],   // amber wash
-  removed:  [243, 232, 255],   // lavender wash
+  worsened: [254, 226, 226],
+  improved: [220, 252, 231],
+  added:    [254, 249, 195],
+  removed:  [243, 232, 255],
   mixed:    [254, 249, 195],
 };
 
@@ -68,10 +65,10 @@ export async function buildComparisonPDF(inspections, diff, property, photoStore
   if (!inspections || inspections.length < 2) {
     throw new Error('buildComparisonPDF: at least 2 inspections required');
   }
+  const isTwoWay = inspections.length === 2;
   const isThreeWay = inspections.length === 3;
 
   // Pre-resolve all photo data URLs across ALL inspections.
-  // Galleries embed photos so we need data URLs ahead of time.
   const photoDataMap = new Map();
   for (const insp of inspections) {
     for (const rd of Object.values(insp.rooms || {})) {
@@ -105,7 +102,13 @@ export async function buildComparisonPDF(inspections, diff, property, photoStore
   doc.setFontSize(20); doc.setFont('helvetica', 'bold');
   doc.text('MoveOut Shield Landlord', MARGIN, 13);
   doc.setFontSize(10); doc.setFont('helvetica', 'normal');
-  doc.text(`Comparison Report — ${inspections.length} inspections`, MARGIN, 21);
+  // Title shifts framing when N>3: "comparison" implies contrasting two
+  // states; "evidence bundle" reads as combining records into one
+  // dispute-grade artifact, which is what the user is doing at that scale.
+  const title = inspections.length > 3
+    ? `Evidence Bundle — ${inspections.length} records`
+    : `Comparison Report — ${inspections.length} inspections`;
+  doc.text(title, MARGIN, 21);
   doc.text(property?.address || '', MARGIN, 27);
   const reportDate = new Date().toLocaleDateString('en-US', {
     year: 'numeric', month: 'long', day: 'numeric',
@@ -114,48 +117,54 @@ export async function buildComparisonPDF(inspections, diff, property, photoStore
   doc.text(property?.name || '', PAGE_W - MARGIN, 27, { align: 'right' });
   y = 38;
 
-  // ─── Inspection cards (2 or 3 across) ──────────────────────────────────
+  // ─── Inspection cards ──────────────────────────────────────────────────
+  // 2-3 across in one row. 4+ wraps into rows of 3 to keep card width
+  // readable. Card height stays fixed; grid expands vertically.
   const cardCount = inspections.length;
+  const perRow = cardCount <= 3 ? cardCount : 3;
   const gap = 4;
-  const cardW = (COL_W - gap * (cardCount - 1)) / cardCount;
+  const cardW = (COL_W - gap * (perRow - 1)) / perRow;
   const cardH = 26;
-  checkY(cardH + 4);
+  const rowCount = Math.ceil(cardCount / perRow);
+  checkY(rowCount * (cardH + 4) + 4);
 
   inspections.forEach((insp, idx) => {
-    const cx = MARGIN + idx * (cardW + gap);
+    const row = Math.floor(idx / perRow);
+    const col = idx % perRow;
+    const cx = MARGIN + col * (cardW + gap);
+    const cy = y + row * (cardH + 4);
     const sourceColor = insp.source === 'tenant' ? TENANT_RGB : LANDLORD_RGB;
-    const sideLabel = String.fromCharCode(65 + idx); // A, B, C
+    const sideLabel = String.fromCharCode(65 + idx); // A, B, C, D, ...
     const typeEntry = inspectionTypeById(insp.type) || {};
 
     // Card body
     doc.setFillColor(249, 247, 244);
     doc.setDrawColor(231, 227, 220);
-    doc.roundedRect(cx, y, cardW, cardH, 2, 2, 'FD');
+    doc.roundedRect(cx, cy, cardW, cardH, 2, 2, 'FD');
     // Left accent stripe (source color)
     doc.setFillColor(...sourceColor);
-    doc.rect(cx, y, 1.5, cardH, 'F');
+    doc.rect(cx, cy, 1.5, cardH, 'F');
 
     // Side + source label
     doc.setTextColor(120, 113, 108);
     doc.setFontSize(7); doc.setFont('helvetica', 'bold');
     const headerLine = `${sideLabel} · ${insp.source === 'tenant' ? 'TENANT' : 'LANDLORD'}`;
-    doc.text(headerLine, cx + 4, y + 5);
+    doc.text(headerLine, cx + 4, cy + 5);
 
     // Inspection type label
     doc.setTextColor(28, 25, 23);
     doc.setFontSize(9); doc.setFont('helvetica', 'bold');
     const labelLines = doc.splitTextToSize(insp.label || typeEntry.label || '(unnamed)', cardW - 6);
-    doc.text(labelLines.slice(0, 2), cx + 4, y + 11);
+    doc.text(labelLines.slice(0, 2), cx + 4, cy + 11);
 
     // Date
     doc.setTextColor(120, 113, 108);
     doc.setFontSize(7); doc.setFont('helvetica', 'normal');
-    doc.text(formatDate(insp.createdAt), cx + 4, y + cardH - 4);
+    doc.text(formatDate(insp.createdAt), cx + 4, cy + cardH - 4);
   });
-  y += cardH + 6;
+  y += rowCount * (cardH + 4) + 6;
 
   // ─── Summary boxes ─────────────────────────────────────────────────────
-  // For 2-way, use diff.summary directly. For 3-way, compute from matrix.
   const summary = computeSummary(inspections, diff, isThreeWay);
   const boxes = [
     { label: 'Total\nItems',    value: String(summary.total),    bg: [243, 240, 235], fg: [60, 60, 60] },
@@ -180,19 +189,34 @@ export async function buildComparisonPDF(inspections, diff, property, photoStore
   y += 28;
 
   // ─── Per-room diff sections ────────────────────────────────────────────
-  if (isThreeWay) {
+  // 2-way and 3-way diffs render their respective comparison bodies.
+  // N>3 (evidence bundles) skip the diff and rely on photo galleries
+  // at the end as the side-by-side evidence surface — the user is
+  // bundling records, not contrasting them.
+  if (isTwoWay) {
+    y = renderTwoWayBody(doc, y, checkY, diff);
+  } else if (isThreeWay) {
     y = renderThreeWayBody(doc, y, checkY, diff, inspections);
   } else {
-    y = renderTwoWayBody(doc, y, checkY, diff);
+    // N>3: cover-page summary already shows totals; jump straight to galleries
+    checkY(14);
+    doc.setFillColor(248, 245, 240);
+    doc.setDrawColor(196, 181, 165);
+    doc.roundedRect(MARGIN, y, COL_W, 11, 2, 2, 'FD');
+    doc.setTextColor(60, 60, 60);
+    doc.setFontSize(8); doc.setFont('helvetica', 'italic');
+    doc.text(
+      `${inspections.length} records bundled. See Photo Evidence section for per-record galleries.`,
+      MARGIN + 4, y + 7
+    );
+    y += 16;
   }
 
   // ─── Photo galleries at the bottom ─────────────────────────────────────
-  // Always start galleries on a fresh page so the visual break is clear.
   if (totalGalleryPhotoCount(inspections) > 0) {
     doc.addPage();
     y = 20;
 
-    // "Photo Evidence" section header
     doc.setFillColor(...BRAND_RGB);
     doc.rect(0, 0, PAGE_W, 18, 'F');
     doc.setTextColor(240, 253, 244);
@@ -210,7 +234,7 @@ export async function buildComparisonPDF(inspections, diff, property, photoStore
   y += 4;
   doc.setTextColor(120, 120, 120); doc.setFontSize(7.5); doc.setFont('helvetica', 'italic');
   const certLine =
-    `Comparison report generated by MoveOut Shield Landlord on ${reportDate}. ` +
+    `Report generated by MoveOut Shield Landlord on ${reportDate}. ` +
     `Photos retain their original EXIF metadata including capture timestamp and GPS coordinates where available.`;
   const certLines = doc.splitTextToSize(certLine, COL_W);
   doc.text(certLines, MARGIN, y);
@@ -239,8 +263,11 @@ function computeSummary(inspections, diff, isThreeWay) {
       improved: diff.summary.improvedItems,
     };
   }
+  if (!diff || !diff.rooms) {
+    // N>3 with no diff computed — return zeros, photo count summary lives elsewhere
+    return { total: 0, changed: 0, worsened: 0, improved: 0 };
+  }
   // 3-way: count from the matrix
-  // For 3-way "worsened" is "got worse from earliest to latest"
   let total = 0, changed = 0, worsened = 0, improved = 0;
   for (const roomEntry of diff.rooms) {
     for (const item of roomEntry.items) {
@@ -250,7 +277,6 @@ function computeSummary(inspections, diff, isThreeWay) {
       const distinct = new Set(seen).size;
       if (distinct > 1) {
         changed++;
-        // Compare first present to last present for worsened/improved
         const first = item.statuses.find(s => s != null);
         const last = [...item.statuses].reverse().find(s => s != null);
         const sev = { clean: 0, fair: 1, na: 1, damaged: 2 };
@@ -266,8 +292,7 @@ function computeSummary(inspections, diff, isThreeWay) {
 // 2-way body — mirrors RoomDiffTwoWay structure
 // ═══════════════════════════════════════════════════════════════════════════
 function renderTwoWayBody(doc, y, checkY, diff) {
-  // Iterate rooms with content
-  const visibleRooms = (diff.rooms || []).filter(rd => {
+  const visibleRooms = (diff?.rooms || []).filter(rd => {
     const hasItemChanges = rd.items.some(it => it.changeType !== 'unchanged');
     const hasNoteChange = rd.notes?.changed;
     return hasItemChanges || hasNoteChange;
@@ -297,7 +322,6 @@ function renderTwoWayBody(doc, y, checkY, diff) {
 function renderTwoWayRoom(doc, y, checkY, rd) {
   const changedItems = rd.items.filter(it => it.changeType !== 'unchanged');
 
-  // Room header band
   checkY(20);
   doc.setFillColor(...BRAND2_RGB);
   doc.roundedRect(MARGIN, y, COL_W, 9, 2, 2, 'F');
@@ -305,7 +329,6 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
   doc.setFontSize(10); doc.setFont('helvetica', 'bold');
   doc.text(`${rd.room.icon} ${rd.room.name}`, MARGIN + 4, y + 6);
 
-  // Right-aligned counts
   const summaryParts = [];
   if (rd.summary.worsened > 0) summaryParts.push(`${rd.summary.worsened} worsened`);
   if (rd.summary.improved > 0) summaryParts.push(`${rd.summary.improved} improved`);
@@ -317,7 +340,6 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
   }
   y += 12;
 
-  // Column headers
   if (changedItems.length > 0) {
     doc.setTextColor(120, 113, 108);
     doc.setFontSize(7); doc.setFont('helvetica', 'bold');
@@ -326,10 +348,8 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
     doc.text('B', MARGIN + COL_W - 16, y + 3.5, { align: 'center' });
     y += 6;
 
-    // Item rows
     for (const item of changedItems) {
       checkY(7);
-      // Wash background per change-type
       const wash = CHANGE_RGB[item.changeType];
       if (wash) {
         const lines = doc.splitTextToSize(item.label, COL_W - 50);
@@ -338,17 +358,14 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
         doc.rect(MARGIN, y - 0.5, COL_W, rowH, 'F');
       }
 
-      // Item label
       doc.setTextColor(28, 25, 23);
       doc.setFontSize(8); doc.setFont('helvetica', 'normal');
       const lines = doc.splitTextToSize(item.label, COL_W - 50);
       doc.text(lines, MARGIN + 2, y + 3);
 
-      // Status badges A and B
       drawStatusBadge(doc, item.a.status, MARGIN + COL_W - 44, y, 12);
       drawStatusBadge(doc, item.b.status, MARGIN + COL_W - 22, y, 12);
 
-      // Arrow if changed
       if (item.changeType !== 'unchanged') {
         doc.setTextColor(180, 100, 30);
         doc.setFontSize(7); doc.setFont('helvetica', 'bold');
@@ -360,7 +377,6 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
     y += 2;
   }
 
-  // Notes diff
   if (rd.notes?.changed) {
     checkY(8);
     doc.setFillColor(254, 249, 195);
@@ -370,7 +386,6 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
     doc.text('NOTES CHANGED', MARGIN + 3, y + 3.5);
     y += 7;
 
-    // A note
     if (rd.notes.a) {
       const aLines = doc.splitTextToSize(rd.notes.a, COL_W - 4);
       checkY(aLines.length * 4 + 4);
@@ -382,7 +397,6 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
       doc.text(aLines, MARGIN + 7, y + 3);
       y += aLines.length * 4 + 1;
     }
-    // B note
     if (rd.notes.b) {
       const bLines = doc.splitTextToSize(rd.notes.b, COL_W - 4);
       checkY(bLines.length * 4 + 4);
@@ -402,10 +416,10 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 3-way body — three-column matrix
+// 3-way body
 // ═══════════════════════════════════════════════════════════════════════════
 function renderThreeWayBody(doc, y, checkY, matrix, inspections) {
-  const visibleRooms = (matrix.rooms || []).filter(rd =>
+  const visibleRooms = (matrix?.rooms || []).filter(rd =>
     rd.items.some(it => new Set(it.statuses.filter(s => s != null)).size > 1)
   );
 
@@ -433,7 +447,6 @@ function renderThreeWayRoom(doc, y, checkY, rd) {
   );
   if (changedItems.length === 0) return y;
 
-  // Room header band
   checkY(20);
   doc.setFillColor(...BRAND2_RGB);
   doc.roundedRect(MARGIN, y, COL_W, 9, 2, 2, 'F');
@@ -442,7 +455,6 @@ function renderThreeWayRoom(doc, y, checkY, rd) {
   doc.text(`${rd.room.icon} ${rd.room.name}`, MARGIN + 4, y + 6);
   y += 12;
 
-  // Column headers (A B C)
   doc.setTextColor(120, 113, 108);
   doc.setFontSize(7); doc.setFont('helvetica', 'bold');
   doc.text('ITEM', MARGIN + 2, y + 3.5);
@@ -456,7 +468,6 @@ function renderThreeWayRoom(doc, y, checkY, rd) {
     const lines = doc.splitTextToSize(item.label, COL_W - 60);
     const rowH = Math.max(5, lines.length * 4) + 1;
 
-    // Wash if any worsening pattern detected
     const sev = { clean: 0, fair: 1, na: 1, damaged: 2 };
     const seen = item.statuses.filter(s => s != null);
     if (seen.length >= 2) {
@@ -505,10 +516,9 @@ function drawStatusBadge(doc, status, x, y, w) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Photo gallery — one per inspection, 3-column thumbnails with captions
+// Photo gallery — one per inspection
 // ═══════════════════════════════════════════════════════════════════════════
 function renderInspectionGallery(doc, y, checkY, inspection, idx, photoDataMap) {
-  // Collect ALL photos from this inspection (both phases, all rooms)
   const photos = [];
   for (const rm of ROOMS) {
     const rd = inspection.rooms?.[rm.id];
@@ -522,7 +532,6 @@ function renderInspectionGallery(doc, y, checkY, inspection, idx, photoDataMap) 
     }
   }
 
-  // Section header — even if no photos, render the header so reader knows
   checkY(14);
   const sideLabel = String.fromCharCode(65 + idx);
   const sourceColor = inspection.source === 'tenant' ? TENANT_RGB : LANDLORD_RGB;
@@ -545,7 +554,6 @@ function renderInspectionGallery(doc, y, checkY, inspection, idx, photoDataMap) 
     return y;
   }
 
-  // Render thumbnails 3-up
   const tW = 56;
   const captionH = 14;
   const gap = 4;
@@ -571,12 +579,10 @@ function renderInspectionGallery(doc, y, checkY, inspection, idx, photoDataMap) 
       try {
         doc.addImage(imgData, 'JPEG', tx, y, tW, tH);
       } catch {
-        // Fallback gray box
         doc.setFillColor(243, 240, 235);
         doc.rect(tx, y, tW, tH, 'F');
       }
     } else {
-      // Missing photo data — draw a placeholder
       doc.setFillColor(243, 240, 235);
       doc.rect(tx, y, tW, tH, 'F');
       doc.setTextColor(160, 155, 150);
@@ -584,7 +590,6 @@ function renderInspectionGallery(doc, y, checkY, inspection, idx, photoDataMap) 
       doc.text('photo unavailable', tx + tW / 2, y + tH / 2, { align: 'center' });
     }
 
-    // Caption block
     let cy = y + tH + 3;
     doc.setTextColor(80, 80, 80);
     doc.setFontSize(6.5); doc.setFont('helvetica', 'bold');
