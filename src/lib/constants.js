@@ -151,9 +151,10 @@ export const THEME = {
 };
 
 // ─── BUNDLE / STORAGE CONSTANTS ────────────────────────────────────────────
-// SUPPORTED_BUNDLE_SCHEMA_VERSIONS removed — .mosinsp bundle import dropped
-// in v0.3. Tenant-side reports now arrive as PDFs and attach to the property
-// via property.attachedPdfs (see portfolioStore.js).
+// Kept for legacy .mosinsp import path (bundleImport.js + main router's
+// share-target handler). Newer tenant evidence also flows through
+// property.attachedPdfs.
+export const SUPPORTED_BUNDLE_SCHEMA_VERSIONS = [1];
 export const PHOTO_ROOT = 'MoveOutShieldLandlord';
 export const STORAGE_KEY_PORTFOLIO = 'mosl_portfolio_v2';
 export const STORAGE_KEY_SETTINGS  = 'mosl_settings_v1';
