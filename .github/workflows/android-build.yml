@@ -57,6 +57,64 @@ jobs:
           npx cap add android
           npx cap sync android
 
+      # ─── Patch AndroidManifest.xml: add runtime permissions ─────────────
+      # Capacitor's default manifest only declares INTERNET. The landlord
+      # app uses getUserMedia for photo capture and Geolocation for GPS-
+      # tagging photos — both require explicit <uses-permission> entries
+      # in the manifest, otherwise Android silently rejects every request
+      # without ever showing the user a prompt. This is the difference
+      # between "tap Camera, see the OS Allow/Deny dialog" and "tap Camera,
+      # nothing happens."
+      #
+      # The CAMERA permission line is what makes the standard Android
+      # permission prompt appear the first time the user opens the camera.
+      # No code changes needed — getUserMedia just works once the manifest
+      # declares the intent.
+      - name: Patch AndroidManifest.xml with runtime permissions
+        run: |
+          python3 << 'PYEOF'
+          import re
+
+          PERMISSIONS = '''    <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+              <uses-feature android:name="android.hardware.camera" android:required="false" />
+              <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+          '''
+
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path, "r") as f:
+              content = f.read()
+
+          # Inject the permissions block immediately before the existing
+          # INTERNET permission (which Capacitor always declares). This keeps
+          # all uses-permission entries grouped together, which matches
+          # convention and survives future cap-add regenerations.
+          if "android.permission.CAMERA" in content:
+              print("CAMERA permission already present — skipping injection")
+          else:
+              new_content = re.sub(
+                  r'(\s*)<uses-permission android:name="android\.permission\.INTERNET" />',
+                  r'\1' + PERMISSIONS.rstrip() + r'\1<uses-permission android:name="android.permission.INTERNET" />',
+                  content,
+                  count=1,
+              )
+              if new_content == content:
+                  # Fallback: INTERNET line wasn't found (unusual). Inject just
+                  # after the opening <manifest> tag instead so the build still
+                  # succeeds, but log loudly so the next run can investigate.
+                  print("WARNING: INTERNET permission not found — injecting at top of manifest")
+                  new_content = re.sub(
+                      r'(<manifest[^>]*>)',
+                      r'\1\n    ' + PERMISSIONS.strip(),
+                      content,
+                      count=1,
+                  )
+              with open(path, "w") as f:
+                  f.write(new_content)
+              print("AndroidManifest.xml patched with CAMERA and LOCATION permissions")
+          PYEOF
+
       # ─── Patch AndroidManifest.xml with .mosinsp intent-filters ─────────
       # Inject before the closing </activity> of MainActivity. This makes
       # MoveOut Shield Landlord show up in the "Open with" sheet for any
