@@ -129,7 +129,17 @@ export async function buildComparisonPDF(inspections, diff, property, photoStore
 
   const doc = new jsPDF({ unit: 'mm', format: 'letter' });
   let y = 20;
-  const checkY = (n = 10) => { if (y + n > FOOTER_LIMIT) { doc.addPage(); y = 20; } };
+  // checkY is now PURE: takes current y, returns possibly-new y after page break.
+  // Callers must reassign: `y = checkY(y, n)`. This avoids the closure-capture
+  // bug where a local `y` parameter inside a helper would diverge from the
+  // outer `y` after addPage(), causing content to render off the page.
+  const checkY = (currentY, n = 10) => {
+    if (currentY + n > FOOTER_LIMIT) {
+      doc.addPage();
+      return 20;
+    }
+    return currentY;
+  };
 
   // ─── Header band ────────────────────────────────────────────────────────
   doc.setFillColor(...BRAND_RGB);
@@ -163,7 +173,7 @@ export async function buildComparisonPDF(inspections, diff, property, photoStore
   const cardW = (COL_W - gap * (perRow - 1)) / perRow;
   const cardH = 26;
   const rowCount = Math.ceil(cardCount / perRow);
-  checkY(rowCount * (cardH + 4) + 4);
+  y = checkY(y, rowCount * (cardH + 4) + 4);
 
   inspections.forEach((insp, idx) => {
     const row = Math.floor(idx / perRow);
@@ -209,7 +219,7 @@ export async function buildComparisonPDF(inspections, diff, property, photoStore
     { label: 'Worsened',        value: String(summary.worsened), bg: summary.worsened > 0 ? [254, 226, 226] : [220, 252, 231], fg: summary.worsened > 0 ? [153, 27, 27] : [6, 95, 70] },
     { label: 'Improved',        value: String(summary.improved), bg: [220, 252, 231], fg: [6, 95, 70] },
   ];
-  checkY(24);
+  y = checkY(y, 24);
   const bW = (COL_W - 9) / 4;
   boxes.forEach((b, i) => {
     const bx = MARGIN + i * (bW + 3);
@@ -232,7 +242,7 @@ export async function buildComparisonPDF(inspections, diff, property, photoStore
   if (isTwoWay) {
     y = renderTwoWayBody(doc, y, checkY, diff);
   } else {
-    checkY(14);
+    y = checkY(y, 14);
     doc.setFillColor(248, 245, 240);
     doc.setDrawColor(196, 181, 165);
     doc.roundedRect(MARGIN, y, COL_W, 11, 2, 2, 'FD');
@@ -329,7 +339,7 @@ function renderTwoWayBody(doc, y, checkY, diff) {
   });
 
   if (visibleRooms.length === 0) {
-    checkY(20);
+    y = checkY(y, 20);
     doc.setFillColor(220, 252, 231);
     doc.setDrawColor(167, 243, 208);
     doc.roundedRect(MARGIN, y, COL_W, 16, 2, 2, 'FD');
@@ -352,7 +362,7 @@ function renderTwoWayBody(doc, y, checkY, diff) {
 function renderTwoWayRoom(doc, y, checkY, rd) {
   const changedItems = rd.items.filter(it => it.changeType !== 'unchanged');
 
-  checkY(20);
+  y = checkY(y, 20);
   doc.setFillColor(...BRAND2_RGB);
   doc.roundedRect(MARGIN, y, COL_W, 9, 2, 2, 'F');
   doc.setTextColor(255, 255, 255);
@@ -380,7 +390,7 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
     y += 6;
 
     for (const item of changedItems) {
-      checkY(7);
+      y = checkY(y, 7);
       const wash = CHANGE_RGB[item.changeType];
       if (wash) {
         const lines = doc.splitTextToSize(item.label, COL_W - 50);
@@ -410,7 +420,7 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
   }
 
   if (rd.notes?.changed) {
-    checkY(8);
+    y = checkY(y, 8);
     doc.setFillColor(254, 249, 195);
     doc.rect(MARGIN, y, COL_W, 5, 'F');
     doc.setTextColor(146, 64, 14);
@@ -420,7 +430,7 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
 
     if (rd.notes.a) {
       const aLines = doc.splitTextToSize(rd.notes.a, COL_W - 4);
-      checkY(aLines.length * 4 + 4);
+      y = checkY(y, aLines.length * 4 + 4);
       doc.setTextColor(...TENANT_RGB);
       doc.setFontSize(7); doc.setFont('helvetica', 'bold');
       doc.text('A:', MARGIN + 2, y + 3);
@@ -431,7 +441,7 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
     }
     if (rd.notes.b) {
       const bLines = doc.splitTextToSize(rd.notes.b, COL_W - 4);
-      checkY(bLines.length * 4 + 4);
+      y = checkY(y, bLines.length * 4 + 4);
       doc.setTextColor(...LANDLORD_RGB);
       doc.setFontSize(7); doc.setFont('helvetica', 'bold');
       doc.text('B:', MARGIN + 2, y + 3);
@@ -487,7 +497,7 @@ function renderInspectionGallery(doc, y, checkY, inspection, idx, photoDataMap) 
   }
 
   // Section header
-  checkY(14);
+  y = checkY(y, 14);
   const sideLabel = String.fromCharCode(65 + idx);
   const sourceColor = inspection.source === 'tenant' ? TENANT_RGB : LANDLORD_RGB;
   doc.setFillColor(...sourceColor);
@@ -518,7 +528,7 @@ function renderInspectionGallery(doc, y, checkY, inspection, idx, photoDataMap) 
   for (const p of photos) {
     if (col === 0) {
       // Starting a new row — check page space for the worst-case cell + caption
-      checkY(PHOTO_MAX_H + PHOTO_CAPTION_H + 4);
+      y = checkY(y, PHOTO_MAX_H + PHOTO_CAPTION_H + 4);
       rowStartY = y;
       rowMaxH = 0;
     }
@@ -613,9 +623,17 @@ function buildCaption(photo) {
 
 function formatDateForCaption(ts) {
   if (!ts) return '';
-  if (/^\d{4}-\d{2}-\d{2}T/.test(ts)) {
-    const d = new Date(ts);
+  // Strategy: try Date.parse first (handles ISO format and "May 6, 09:16 PM"
+  // display format). If valid, format as "May 6". If parsing fails, the
+  // timestamp may be a free-form display string — fall back to taking just
+  // the leading "Mon D" segment (everything before the first comma) so the
+  // caption stays single-line.
+  const parsed = Date.parse(ts);
+  if (!isNaN(parsed)) {
+    const d = new Date(parsed);
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   }
+  const commaIdx = ts.indexOf(',');
+  if (commaIdx > 0) return ts.slice(0, commaIdx);
   return ts;
 }
