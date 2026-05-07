@@ -81,9 +81,6 @@ export default function PropertyScreen({
   const [attachedPdfsOpen, setAttachedPdfsOpen] = useState(false);
   const [pdfBusy, setPdfBusy] = useState(false);
   const [editingTenancyId, setEditingTenancyId] = useState(null);
-  // Pills picker state — when set to a tenancy, the picker modal opens and
-  // shows that tenancy's records. User picks one → routes to CaptureScreen.
-  const [pillsPickerTenancyId, setPillsPickerTenancyId] = useState(null);
 
   if (!property) {
     return (
@@ -225,19 +222,6 @@ export default function PropertyScreen({
     if (next.has(tenancyId)) next.delete(tenancyId);
     else next.add(tenancyId);
     setCollapsedTenancies(next);
-  };
-
-  // ─── Pills picker handler ─────────────────────────────────────────────
-  // Tapping the Pills button on a lease card opens a record picker scoped
-  // to that lease. User picks one → we route to CaptureScreen for editing
-  // (no autoOpenCamera; user is editing pills, not capturing).
-  const handleOpenPills = (tenancyId) => setPillsPickerTenancyId(tenancyId);
-
-  const handlePillsRecordPick = (inspectionId) => {
-    setPillsPickerTenancyId(null);
-    // route: 'capture' explicitly — Pills picks always go to CaptureScreen
-    // (per-room items+statuses surface), not the photodoc grid surface.
-    if (onCapture) onCapture(inspectionId, { route: 'capture' });
   };
 
   // ─── PDF generation from bottom sheet ─────────────────────────────────
@@ -499,7 +483,6 @@ export default function PropertyScreen({
               onOpenInspection={onCapture}
               onCreateInspection={(typeId, opts) => handleNewInspection(typeId, tenancy.id, opts)}
               onTenancyFindings={onTenancyFindings ? () => onTenancyFindings(tenancy.id) : null}
-              onOpenPills={() => handleOpenPills(tenancy.id)}
             />
           );
         })}
@@ -571,14 +554,6 @@ export default function PropertyScreen({
             setEditingTenancyId(null);
           }}
           onCancel={() => setEditingTenancyId(null)}
-        />
-      )}
-
-      {pillsPickerTenancyId && (
-        <PillsRecordPicker
-          tenancy={property.tenancies.find(t => t.id === pillsPickerTenancyId)}
-          onPick={handlePillsRecordPick}
-          onClose={() => setPillsPickerTenancyId(null)}
         />
       )}
     </div>
@@ -693,7 +668,6 @@ function TenancySection({
   tenancy, property, isActive, isCollapsed,
   onToggleCollapsed, onDeleteTenancy, onEditTenancy,
   onDeleteInspection, onOpenInspection, onCreateInspection, onTenancyFindings,
-  onOpenPills,
 }) {
   const tenantNames = tenancy.tenants?.length > 0 ? tenancy.tenants.join(', ') : '(unnamed tenant)';
 
@@ -792,17 +766,6 @@ function TenancySection({
             />
           )}
 
-          {/* Pills button — opens record picker for editing per-room item statuses.
-              Only shown when there's at least one record in this lease — nothing
-              to edit pills on otherwise. Routes to CaptureScreen for the picked
-              record (the per-room items+statuses surface). */}
-          {onOpenPills && tenancy.inspections.length > 0 && (
-            <button onClick={onOpenPills} style={btnPills}>
-              <span style={{ fontSize: 16 }}>🪄</span>
-              <span>Pills · pick a record to edit</span>
-            </button>
-          )}
-
           {sortedInspections.length === 0 ? (
             <div style={{
               fontSize: 12, color: THEME.muted2, padding: '12px 0',
@@ -896,12 +859,6 @@ function PhotoDocumentButton({ tenancy, property, onCreate, onOpenExisting }) {
     setPickerOpen(false);
     if (typeId === 'other-custom') {
       setOtherPromptOpen(true);
-      return;
-    }
-    if (typeId === 'other-numbered') {
-      const n = nextOtherCounter(property);
-      // Auto-numbered Other → photodoc with camera auto-open
-      onCreate('other', { label: `Other: ${n}`, autoOpenCamera: true });
       return;
     }
     if (typeId === 'turnover') {
@@ -1037,30 +994,18 @@ function TypePicker({ existingByType, onPick, onClose }) {
             </div>
           </button>
 
-          {/* Other (auto-numbered) — quick-tap path, no prompt */}
-          <button
-            onClick={() => onPick('other-numbered')}
-            style={typeOption}
-          >
-            <span style={{ fontSize: 22, lineHeight: 1 }}>📝</span>
-            <div style={{ flex: 1, textAlign: 'left' }}>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>Other</div>
-              <div style={{ fontSize: 10.5, color: THEME.muted, marginTop: 2 }}>
-                Auto-numbered as "Other: N"
-              </div>
-            </div>
-          </button>
-
-          {/* Other (custom label) — opens prompt for user-typed label */}
+          {/* Other — single entry, double duty: tap and type a label, OR
+              tap and submit blank to auto-number as "Other: N". The blank
+              fallback is wired in submitOtherLabel below. */}
           <button
             onClick={() => onPick('other-custom')}
             style={typeOption}
           >
             <span style={{ fontSize: 22, lineHeight: 1 }}>📝</span>
             <div style={{ flex: 1, textAlign: 'left' }}>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>Other (custom label)</div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>Other</div>
               <div style={{ fontSize: 10.5, color: THEME.muted, marginTop: 2 }}>
-                e.g. "fridge replacement", "noise complaint"
+                Type a label or leave blank for auto-numbered "Other: N"
               </div>
             </div>
           </button>
@@ -1116,133 +1061,6 @@ function OtherLabelPrompt({ value, onChange, onSubmit, onCancel }) {
           <button onClick={onCancel} style={{ ...btnSecondary, flex: 1 }}>Cancel</button>
           <button onClick={onSubmit} style={{ ...btnPrimary, flex: 1, marginTop: 0 }}>OK</button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PillsRecordPicker — modal listing records in a tenancy for pill editing
-// ═══════════════════════════════════════════════════════════════════════════
-// Shown when the user taps the Pills button on a lease card. Surfaces every
-// record in that lease as a tappable row. Tapping a record routes to
-// CaptureScreen (per-room items+statuses surface) so the user can edit
-// pills, add notes, or capture more photos for that record. The record's
-// type is unchanged — Pills is a re-entry point to existing CaptureScreen
-// behavior, not a type-changing operation.
-function PillsRecordPicker({ tenancy, onPick, onClose }) {
-  if (!tenancy) return null;
-
-  const TYPE_ORDER = {
-    baseline: 0,
-    mid_lease: 1,
-    post_tenant: 2,
-    other: 3,
-    tenant_move_in: 4,
-    tenant_move_out: 5,
-  };
-  const sortedInspections = [...tenancy.inspections].sort((a, b) => {
-    const aOrder = TYPE_ORDER[a.type] ?? 99;
-    const bOrder = TYPE_ORDER[b.type] ?? 99;
-    if (aOrder !== bOrder) return aOrder - bOrder;
-    return new Date(a.createdAt) - new Date(b.createdAt);
-  });
-
-  const tenantNames = tenancy.tenants?.length > 0 ? tenancy.tenants.join(', ') : '(unnamed tenant)';
-
-  return (
-    <div style={modalBackdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={{
-        background: THEME.paper, borderRadius: 16, padding: 22,
-        maxWidth: 460, width: '100%',
-        border: `2px solid ${THEME.brand}`,
-        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
-        maxHeight: '85vh', display: 'flex', flexDirection: 'column',
-      }}>
-        <div style={{ fontSize: 13, color: THEME.muted, fontWeight: 600, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-          🪄 Pills
-        </div>
-        <div style={{ fontSize: 17, fontWeight: 700, color: THEME.ink, marginBottom: 4 }}>
-          Pick a record to edit
-        </div>
-        <div style={{ fontSize: 11, color: THEME.muted, marginBottom: 14, lineHeight: 1.5 }}>
-          {tenantNames} · Tap a record to open its per-room items and statuses.
-          You can edit pills, add notes, or capture more photos there.
-        </div>
-
-        <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
-          {sortedInspections.length === 0 ? (
-            <div style={{
-              padding: 24, textAlign: 'center', color: THEME.muted2,
-              fontSize: 13, fontStyle: 'italic',
-              background: THEME.bg, borderRadius: 10,
-              border: `1px dashed ${THEME.edge}`,
-            }}>
-              No records in this lease yet.<br />
-              Tap <strong style={{ color: THEME.brand }}>+ Photo Document</strong> first.
-            </div>
-          ) : (
-            sortedInspections.map(insp => {
-              const typeEntry = inspectionTypeById(insp.type) || {};
-              const metrics = inspectionMetrics(insp);
-              const ratedPct = metrics.possible > 0
-                ? Math.round((metrics.rated / metrics.possible) * 100)
-                : 0;
-              return (
-                <button
-                  key={insp.id}
-                  onClick={() => onPick(insp.id)}
-                  disabled={!insp.editable}
-                  style={{
-                    background: insp.editable ? THEME.mint50 : THEME.surface,
-                    border: `2px solid ${insp.editable ? THEME.mint300 : THEME.edge}`,
-                    borderRadius: 10, padding: '10px 12px',
-                    cursor: insp.editable ? 'pointer' : 'not-allowed',
-                    display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
-                    width: '100%', opacity: insp.editable ? 1 : 0.55,
-                  }}
-                >
-                  <span style={{ fontSize: 18 }}>{typeEntry.icon || '📋'}</span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{
-                      fontSize: 13, fontWeight: 600, color: THEME.ink,
-                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                      display: 'flex', alignItems: 'center', gap: 6,
-                    }}>
-                      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {insp.label}
-                      </span>
-                      {!insp.editable && (
-                        <span style={{
-                          fontSize: 9, color: '#fff', background: THEME.tenant,
-                          padding: '2px 5px', borderRadius: 4, fontWeight: 700,
-                          textTransform: 'uppercase', letterSpacing: 0.4, flexShrink: 0,
-                        }}>
-                          R/O
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ fontSize: 11, color: THEME.muted, marginTop: 2 }}>
-                      {typeEntry.label} · {formatDate(insp.createdAt)} · 📸 {metrics.photos}
-                    </div>
-                  </div>
-                  {metrics.possible > 0 && (
-                    <div style={{
-                      fontSize: 10, color: THEME.brand, background: '#fff',
-                      padding: '3px 9px', borderRadius: 999, fontWeight: 700,
-                      border: `1.5px solid ${THEME.brand2}`,
-                      flexShrink: 0,
-                    }}>
-                      {ratedPct}%
-                    </div>
-                  )}
-                </button>
-              );
-            })
-          )}
-        </div>
-
-        <button onClick={onClose} style={btnSecondary}>Cancel</button>
       </div>
     </div>
   );
@@ -1986,19 +1804,6 @@ const typeOptionUsed = {
   display: 'flex', alignItems: 'center', gap: 12,
   minHeight: 56,
   opacity: 0.85,
-};
-
-// ─── Pills button (lease card) ────────────────────────────────────────────
-// Sits between Photo Document split button and the Tenancy Findings button.
-// Mint-tinted to read as a "scoped re-entry" action — distinct from the
-// brand-green primary actions (Photo Document, Findings).
-const btnPills = {
-  background: THEME.mint50, color: THEME.brand,
-  border: `2px solid ${THEME.mint300}`, borderRadius: 12,
-  padding: '12px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer',
-  width: '100%',
-  marginBottom: 10,
-  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
 };
 
 // ─── (typeOption / typeOptionUsed defined above with the photoDocBtn) ────
