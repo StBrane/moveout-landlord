@@ -1,530 +1,412 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// main.jsx — MoveOut Shield Landlord app entry point (v0.3.0)
+// pdfBuilder.js — generate a printable inspection report PDF
+// v0.4 — Variant C photo grid, emoji-stripped, footer URL, last-page cert
 // ═══════════════════════════════════════════════════════════════════════════
-// Hash-based router. Six primary routes:
+// Single-inspection report (one phase only — the inspection's defaultSlot)
+// rather than the tenant's combined move-in + move-out doc. Landlord
+// inspections are typically focused on one phase at a time (a baseline,
+// a post-tenant, etc.) so the report renders that one phase.
 //
-//   #/                                       → Portfolio (property list)
-//   #/property/{propertyId}                  → Property detail (leases + records)
-//   #/capture/{propertyId}/{inspectionId}    → CaptureScreen (per-room items+pills)
-//   #/photodoc/{propertyId}/{inspectionId}   → PhotoDocGridScreen (flat photo grid)
-//   #/compare/{propertyId}/{aId}/{bId}[/{cId}]→ ChangesScreen (2- or 3-way)
-//   #/findings/{propertyId}/{tenancyId}      → TenancyFindingsScreen
+// Cover page includes tenancy context (tenant names, lease span, rent,
+// deposit) alongside the property metadata, since landlord reports are
+// typically attached to a specific tenancy's records.
 //
-// PDF import (replaces the dead .mosinsp share-target flow):
-//   - PropertyScreen's "+ Import PDF" calls onImportPdf({ propertyId })
-//   - main.jsx triggers a hidden <input type="file" accept=".pdf">
-//   - On pick: read as ArrayBuffer → write to Directory.Data under
-//     MoveOutShieldLandlord/<propertyId>/pdfs/<uid>.pdf
-//   - Read pageCount via pdf-lib (lazy import)
-//   - attachPdf(portfolio, propertyId, { id, fileName, path, importedAt, pageCount })
-//   - PDF stays on disk forever (until detachPdf), referenced from
-//     property.attachedPdfs[]. PdfPickerSheet shows them as bundle options.
+// Public API:
+//   buildInspectionPDF(inspection, property, tenancy, photoStore) → Promise<jsPDF>
 //
-// Photo Document routing (the new fast-path capture flow):
-//   - + Photo Document main tap creates an "Other:N" record and calls onCapture
-//     with { route: 'photodoc' } so the route uses #/photodoc/...
-//   - + Photo Document chevron picks (Baseline/Mid-lease/Post-tenant/Turnover/Other-with-label)
-//     create their respective typed record and use #/capture/... (existing CaptureScreen)
-//   - Pills button on lease card opens a record picker → routes to #/capture/...
+// PHOTO LAYOUT (Variant C, agreed v0.4):
+//   - Page document margin: 18mm
+//   - Photo gallery local margin: 14mm
+//   - 4-up grid, 2mm gap, ~47mm cells, 64mm max height
+//   - Letterbox-fit: aspect always preserved
+//   - Caption: single line (date · GPS or just date)
 //
-// The .mosinsp pipeline is gone. parseBundleString, readBundleFile, importBundle,
-// importBundleFromMemory, ConfirmImportModal, getLaunchUrl/appUrlOpen handlers,
-// findTenancyForDate (still in portfolioStore for the diff engine), and all
-// related state are removed.
+// EMOJI / FOOTER / CERT:
+//   See comparisonPDF.js — same v0.4 conventions.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import ReactDOM from 'react-dom/client';
-import { Capacitor } from '@capacitor/core';
-import { Filesystem, Directory } from '@capacitor/filesystem';
-import { Share } from '@capacitor/share';
-import { SplashScreen } from '@capacitor/splash-screen';
-
-import { THEME, PHOTO_ROOT, uid } from './lib/constants.js';
+import { jsPDF } from 'jspdf';
 import {
-  loadPortfolio, savePortfolio,
-  attachPdf,
-} from './lib/portfolioStore.js';
-import { makePhotoStore } from './lib/photoStore.js';
-import { buildComparisonPDF } from './lib/comparisonPDF.js';
-import { buildTenancyFindingsPDF } from './lib/tenancyFindingsPDF.js';
-import { readPdfPageCount } from './lib/pdfMerge.js';
+  ROOMS, STATUS, STATE_LAWS,
+  inspectionTypeById, formatDate, formatTenancySpan,
+} from './constants.js';
 
-import PortfolioScreen from './screens/PortfolioScreen.jsx';
-import PropertyScreen from './screens/PropertyScreen.jsx';
-import ChangesScreen from './screens/ChangesScreen.jsx';
-import CaptureScreen from './screens/CaptureScreen.jsx';
-import PhotoDocGridScreen from './screens/PhotoDocGridScreen.jsx';
-import TenancyFindingsScreen from './screens/TenancyFindingsScreen.jsx';
+// ───────────────────────────────────────────────────────────────────────────
+// Render constants — letter size in millimeters, forest-green header
+// ───────────────────────────────────────────────────────────────────────────
+const PAGE_W = 215.9;
+const PAGE_H = 279.4;
+const MARGIN = 18;
+const COL_W = PAGE_W - MARGIN * 2;
+const FOOTER_LIMIT = 268;   // leave 11mm for footer
 
-const IS_NATIVE = Capacitor.isNativePlatform();
+// Photo gallery local margin (Variant C)
+const PHOTO_MARGIN = 14;
+const PHOTO_COL_W = PAGE_W - PHOTO_MARGIN * 2;
+const PHOTO_COLS = 4;
+const PHOTO_GAP = 2;
+const PHOTO_CELL_W = (PHOTO_COL_W - PHOTO_GAP * (PHOTO_COLS - 1)) / PHOTO_COLS;
+const PHOTO_MAX_H = 64;
+const PHOTO_CAPTION_H = 5;
 
-// ─────────────────────────────────────────────────────────────────────────
-// Hash router — minimal, no dependency
-// ─────────────────────────────────────────────────────────────────────────
-function parseRoute(hash) {
-  // Hash format: "#/path/segments?key=value"
-  const raw = (hash || '').replace(/^#\/?/, '');
-  const [pathPart, queryPart] = raw.split('?');
-  const parts = pathPart.split('/').filter(Boolean);
-  const query = {};
-  if (queryPart) {
-    for (const kv of queryPart.split('&')) {
-      const [k, v] = kv.split('=');
-      if (k) query[decodeURIComponent(k)] = v == null ? '' : decodeURIComponent(v);
+const SITE_URL = 'moveoutshield.app';
+
+// Forest green RGB matching THEME.brand
+const BRAND_RGB = [27, 58, 45];      // #1B3A2D
+const BRAND2_RGB = [43, 106, 79];    // #2D6A4F
+
+// Status text colors for the per-item rows
+const STATUS_RGB = {
+  clean:   [30, 64, 175],
+  fair:    [6, 95, 70],
+  damaged: [153, 27, 27],
+  na:      [80, 80, 80],
+};
+
+// ───────────────────────────────────────────────────────────────────────────
+// Public: build the inspection report
+// ───────────────────────────────────────────────────────────────────────────
+export async function buildInspectionPDF(inspection, property, tenancy, photoStore) {
+  if (!inspection) throw new Error('buildInspectionPDF: inspection required');
+
+  const typeEntry = inspectionTypeById(inspection.type);
+  const slot = typeEntry?.defaultSlot || 'moveIn';
+  const phaseLabel = slot === 'moveIn' ? 'Move-In Condition' : 'Move-Out Condition';
+
+  // Pre-resolve all photo data URLs (PDF embedding needs base64)
+  const photoDataMap = new Map();
+  for (const rm of ROOMS) {
+    const phaseData = inspection.rooms?.[rm.id]?.[slot];
+    if (!phaseData?.photos) continue;
+    for (const p of phaseData.photos) {
+      const key = p.path || p.url || '';
+      if (!key || photoDataMap.has(key)) continue;
+      if (p.url) {
+        photoDataMap.set(key, p.url);
+      } else if (p.path && photoStore) {
+        try {
+          const dataUrl = await photoStore.readAsDataUrl(p.path);
+          if (dataUrl) photoDataMap.set(key, dataUrl);
+        } catch {
+          // skip — broken photo path, will render as a gap
+        }
+      }
     }
   }
-  if (parts.length === 0) return { name: 'portfolio' };
-  if (parts[0] === 'property' && parts[1]) return { name: 'property', propertyId: parts[1] };
-  if (parts[0] === 'capture' && parts[1] && parts[2]) {
-    return {
-      name: 'capture',
-      propertyId: parts[1],
-      inspectionId: parts[2],
-      autoOpenCamera: query.cam === '1',
-    };
+
+  const doc = new jsPDF({ unit: 'mm', format: 'letter' });
+  let y = 20;
+  // checkY is PURE: takes current y, returns possibly-new y after page break.
+  // Callers must reassign: `y = checkY(y, n)`. See comparisonPDF.js for the
+  // closure-capture bug this pattern fixes.
+  const checkY = (currentY, n = 10) => {
+    if (currentY + n > FOOTER_LIMIT) {
+      doc.addPage();
+      return 20;
+    }
+    return currentY;
+  };
+
+  // ─── Header band ─────────────────────────────────────────────────────────
+  doc.setFillColor(...BRAND_RGB);
+  doc.rect(0, 0, PAGE_W, 30, 'F');
+  doc.setTextColor(240, 253, 244);
+  doc.setFontSize(20); doc.setFont('helvetica', 'bold');
+  doc.text('MoveOut Shield Landlord', MARGIN, 13);
+  doc.setFontSize(10); doc.setFont('helvetica', 'normal');
+  // Hyphen for em-dash compatibility (jsPDF helvetica)
+  doc.text(`${typeEntry?.label || 'Inspection'} - ${phaseLabel}`, MARGIN, 21);
+  doc.text(property?.address || '', MARGIN, 27);
+  const reportDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  doc.text(reportDate, PAGE_W - MARGIN, 21, { align: 'right' });
+  doc.text(property?.name || '', PAGE_W - MARGIN, 27, { align: 'right' });
+  y = 38;
+
+  // ─── Tenancy context block (if attached to a tenancy) ───────────────────
+  if (tenancy) {
+    y = checkY(y, 28);
+    doc.setFillColor(248, 245, 240); doc.setDrawColor(196, 181, 165);
+    doc.roundedRect(MARGIN, y, COL_W, 22, 3, 3, 'FD');
+    doc.setTextColor(...BRAND_RGB);
+    doc.setFontSize(9); doc.setFont('helvetica', 'bold');
+    doc.text('Tenancy', MARGIN + 4, y + 6);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(40, 40, 40);
+    const tenants = tenancy.tenants?.length ? tenancy.tenants.join(', ') : '(unnamed)';
+    const span = formatTenancySpan(tenancy);
+    doc.text(`Tenants: ${tenants}`, MARGIN + 4, y + 12);
+    doc.text(`Lease: ${span}`, MARGIN + 4, y + 17);
+    const moneyLine = [
+      tenancy.rent != null ? `Rent $${tenancy.rent}/mo` : null,
+      tenancy.deposit != null ? `Deposit $${tenancy.deposit}` : null,
+    ].filter(Boolean).join(' \u00B7 ');
+    if (moneyLine) doc.text(moneyLine, PAGE_W - MARGIN - 4, y + 17, { align: 'right' });
+    y += 28;
   }
-  if (parts[0] === 'photodoc' && parts[1] && parts[2]) {
-    return {
-      name: 'photodoc',
-      propertyId: parts[1],
-      inspectionId: parts[2],
-      autoOpenCamera: query.cam === '1',
-    };
+
+  // ─── State law block ────────────────────────────────────────────────────
+  if (inspection.stateIdx != null && STATE_LAWS[inspection.stateIdx]) {
+    const sl = STATE_LAWS[inspection.stateIdx];
+    y = checkY(y, 26);
+    doc.setFillColor(239, 246, 255); doc.setDrawColor(147, 197, 253);
+    doc.roundedRect(MARGIN, y, COL_W, 22, 3, 3, 'FD');
+    doc.setTextColor(30, 64, 175);
+    doc.setFontSize(9); doc.setFont('helvetica', 'bold');
+    doc.text(`${sl[0]} Deposit Law`, MARGIN + 4, y + 7);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Return deadline: ${sl[2]} days after move-out`, MARGIN + 4, y + 13);
+    const penLine = doc.splitTextToSize(`Penalty: ${sl[3]}  |  ${sl[4]}`, COL_W - 8);
+    doc.text(penLine, MARGIN + 4, y + 19);
+    y += 28;
   }
-  if (parts[0] === 'compare' && parts[1] && parts[2] && parts[3]) {
-    const ids = [parts[2], parts[3], parts[4]].filter(Boolean);
-    return { name: 'compare', propertyId: parts[1], inspectionIds: ids };
+
+  // ─── Inspection summary boxes ────────────────────────────────────────────
+  let totalRated = 0;
+  let totalPossible = 0;
+  let totalPhotos = 0;
+  let damagedCount = 0;
+  for (const rm of ROOMS) {
+    const phaseData = inspection.rooms?.[rm.id]?.[slot];
+    if (!phaseData) continue;
+    const ratedHere = phaseData.statuses ? Object.keys(phaseData.statuses).length : 0;
+    const photosHere = phaseData.photos?.length || 0;
+    if (ratedHere > 0 || photosHere > 0 || (phaseData.notes || '').trim()) {
+      totalPossible += rm.items.length;
+      totalRated += ratedHere;
+      totalPhotos += photosHere;
+      for (const status of Object.values(phaseData.statuses || {})) {
+        if (status === 'damaged') damagedCount++;
+      }
+    }
   }
-  if (parts[0] === 'findings' && parts[1] && parts[2]) {
-    return { name: 'findings', propertyId: parts[1], tenancyId: parts[2] };
+
+  const boxes = [
+    { label: 'Items\nRated', value: `${totalRated}/${totalPossible || '-'}`, bg: [209, 250, 229], fg: [6, 95, 70] },
+    { label: 'Photos\nCaptured', value: String(totalPhotos), bg: [254, 249, 195], fg: [146, 64, 14] },
+    { label: 'Damaged\nItems', value: String(damagedCount),
+      bg: damagedCount > 0 ? [254, 226, 226] : [209, 250, 229],
+      fg: damagedCount > 0 ? [153, 27, 27] : [6, 95, 70] },
+    { label: 'Inspected\nOn', value: formatDate(inspection.createdAt), bg: [219, 234, 254], fg: [30, 64, 175] },
+  ];
+  y = checkY(y, 24);
+  const bW = (COL_W - 9) / 4;
+  boxes.forEach((b, i) => {
+    const bx = MARGIN + i * (bW + 3);
+    doc.setFillColor(...b.bg);
+    doc.roundedRect(bx, y, bW, 20, 2, 2, 'F');
+    doc.setTextColor(...b.fg);
+    doc.setFontSize(13); doc.setFont('helvetica', 'bold');
+    doc.text(b.value, bx + bW / 2, y + 9, { align: 'center' });
+    doc.setFontSize(6); doc.setFont('helvetica', 'normal');
+    b.label.split('\n').forEach((ll, li) => {
+      doc.text(ll, bx + bW / 2, y + 14 + li * 3.5, { align: 'center' });
+    });
+  });
+  y += 28;
+
+  // ─── Per-room sections ──────────────────────────────────────────────────
+  for (const rm of ROOMS) {
+    const phaseData = inspection.rooms?.[rm.id]?.[slot];
+    if (!phaseData) continue;
+    const statusKeys = Object.keys(phaseData.statuses || {});
+    const hasNotes = (phaseData.notes || '').trim().length > 0;
+    const hasPhotos = (phaseData.photos?.length || 0) > 0;
+
+    // Skip rooms with no engagement
+    if (!statusKeys.length && !hasNotes && !hasPhotos) continue;
+
+    // Room header band — emoji-stripped (rm.name only)
+    y = checkY(y, 20);
+    doc.setFillColor(...BRAND2_RGB);
+    doc.roundedRect(MARGIN, y, COL_W, 10, 2, 2, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(10); doc.setFont('helvetica', 'bold');
+    doc.text(rm.name, MARGIN + 4, y + 7);
+    y += 14;
+
+    // Item ratings
+    if (statusKeys.length > 0) {
+      rm.items.forEach((item, i) => {
+        const st = phaseData.statuses[i];
+        if (!st) return;
+        y = checkY(y, 6);
+        const clr = STATUS_RGB[st] || [80, 80, 80];
+        doc.setTextColor(...clr);
+        doc.setFontSize(8); doc.setFont('helvetica', 'bold');
+        const shortLabel = STATUS[st]?.short || st.toUpperCase();
+        doc.text(`[${shortLabel}]`, MARGIN + 2, y);
+        doc.setTextColor(40, 40, 40); doc.setFont('helvetica', 'normal');
+        const lines = doc.splitTextToSize(item, COL_W - 26);
+        doc.text(lines, MARGIN + 22, y);
+        y += lines.length * 4.5;
+      });
+      y += 2;
+    }
+
+    // Notes
+    if (hasNotes) {
+      y = checkY(y, 8);
+      doc.setFillColor(254, 249, 195);
+      doc.rect(MARGIN, y, COL_W, 6, 'F');
+      doc.setTextColor(146, 64, 14);
+      doc.setFontSize(7.5); doc.setFont('helvetica', 'bold');
+      doc.text('NOTES', MARGIN + 3, y + 4.5);
+      y += 8;
+      const nl = doc.splitTextToSize(phaseData.notes, COL_W - 4);
+      doc.setTextColor(80, 60, 0); doc.setFontSize(8); doc.setFont('helvetica', 'normal');
+      y = checkY(y, nl.length * 4.5);
+      doc.text(nl, MARGIN + 2, y);
+      y += nl.length * 4.5 + 2;
+    }
+
+    // Photos (Variant C 4-up letterbox grid)
+    if (hasPhotos) {
+      y = checkY(y, 10);
+      doc.setTextColor(...BRAND_RGB); doc.setFontSize(8); doc.setFont('helvetica', 'bold');
+      doc.text(`${phaseData.photos.length} photo(s)`, MARGIN + 2, y);
+      y += 6;
+
+      y = renderPhotoGrid(doc, y, checkY, phaseData.photos, photoDataMap);
+    }
+
+    y += 6;
   }
-  return { name: 'portfolio' };
+
+  // ─── Certification footer (rendered on last page bottom margin) ─────────
+  const lastPage = doc.internal.getNumberOfPages();
+  doc.setPage(lastPage);
+  doc.setTextColor(120, 120, 120);
+  doc.setFontSize(7.5); doc.setFont('helvetica', 'italic');
+  const certLine = `I certify this report accurately reflects the condition of the unit at the time of inspection. - ${property?.name || ''}, ${reportDate}`;
+  const certLines = doc.splitTextToSize(certLine, COL_W);
+  const certY = PAGE_H - 12 - certLines.length * 3.5;
+  doc.text(certLines, MARGIN, certY);
+
+  // ─── Footer on every page (URL left, page-num right) ────────────────────
+  const pageCount = doc.internal.getNumberOfPages();
+  for (let pn = 1; pn <= pageCount; pn++) {
+    doc.setPage(pn);
+    doc.setTextColor(160, 155, 150);
+    doc.setFontSize(7); doc.setFont('helvetica', 'normal');
+    doc.text(SITE_URL, MARGIN, PAGE_H - 8);
+    doc.text(`Page ${pn} of ${pageCount}`, PAGE_W - MARGIN, PAGE_H - 8, { align: 'right' });
+  }
+
+  return doc;
 }
 
-function navigate(path) { window.location.hash = path; }
+// ─── Variant C photo grid (4-up letterbox) ──────────────────────────────────
+// Shared layout used for per-room photos in this single-inspection report.
+function renderPhotoGrid(doc, y, checkY, photos, photoDataMap) {
+  let col = 0;
+  let rowMaxH = 0;
+  let rowStartY = y;
 
-// ─────────────────────────────────────────────────────────────────────────
-// App root
-// ─────────────────────────────────────────────────────────────────────────
-function App() {
-  const [portfolio, setPortfolio] = useState(() => loadPortfolio());
-  const [route, setRoute] = useState(() => parseRoute(window.location.hash));
-  const [importBusy, setImportBusy] = useState(null);   // { fileName } | null
-  const [importError, setImportError] = useState(null);
-  const [importSuccess, setImportSuccess] = useState(null);
-
-  // Hidden file input for the property-level "+ Import PDF" button.
-  // Triggered programmatically from PropertyScreen via onImportPdf.
-  const fileInputRef = useRef(null);
-  // Remember which property the user tapped Import from, since the file
-  // picker doesn't carry that context through its native dialog.
-  const importTargetPropertyIdRef = useRef(null);
-
-  const photoStore = useMemo(() => makePhotoStore({ Capacitor, Filesystem, Directory }), []);
-
-  // Persist portfolio on every change
-  useEffect(() => { savePortfolio(portfolio); }, [portfolio]);
-
-  // Listen for hash changes
-  useEffect(() => {
-    const onChange = () => setRoute(parseRoute(window.location.hash));
-    window.addEventListener('hashchange', onChange);
-    return () => window.removeEventListener('hashchange', onChange);
-  }, []);
-
-  // Hide splash once mounted
-  useEffect(() => {
-    if (IS_NATIVE) SplashScreen.hide().catch(() => {});
-  }, []);
-
-  // ─────────────────────────────────────────────────────────────────────
-  // PDF attach flow (replaces the .mosinsp pipeline)
-  //
-  // Flow:
-  //   1. PropertyScreen → "+ Import PDF" → onImportPdf({ propertyId })
-  //   2. triggerImportPdf stashes propertyId, opens hidden file input
-  //   3. User picks a .pdf
-  //   4. handlePdfPicked reads bytes, writes to disk, reads pageCount,
-  //      attaches metadata to property.attachedPdfs[]
-  //   5. Success toast surfaces filename + page count
-  // ─────────────────────────────────────────────────────────────────────
-  const triggerImportPdf = useCallback((opts = {}) => {
-    importTargetPropertyIdRef.current = opts.propertyId || null;
-    fileInputRef.current?.click();
-  }, []);
-
-  const handlePdfPicked = useCallback(async (event) => {
-    const file = event.target.files?.[0];
-    const targetPropertyId = importTargetPropertyIdRef.current;
-    if (!file) return;
-    event.target.value = '';  // reset so picking the same file twice still fires
-
-    if (!targetPropertyId) {
-      setImportError('Internal error: no target property set for PDF import.');
-      return;
+  for (const p of photos) {
+    if (col === 0) {
+      y = checkY(y, PHOTO_MAX_H + PHOTO_CAPTION_H + 4);
+      rowStartY = y;
+      rowMaxH = 0;
     }
 
-    if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
-      setImportError(`"${file.name}" is not a PDF. Files must have a .pdf extension.`);
-      return;
+    const cx = PHOTO_MARGIN + col * (PHOTO_CELL_W + PHOTO_GAP);
+    const cy = rowStartY;
+
+    // Letterbox-fit dimensions
+    const ratio = (typeof p.ratio === 'number' && p.ratio > 0) ? p.ratio : 0.75;
+    let drawW, drawH;
+    const naturalH = PHOTO_CELL_W * ratio;
+    if (naturalH <= PHOTO_MAX_H) {
+      drawW = PHOTO_CELL_W;
+      drawH = naturalH;
+    } else {
+      drawH = PHOTO_MAX_H;
+      drawW = drawH / ratio;
     }
+    const drawX = cx + (PHOTO_CELL_W - drawW) / 2;
+    const drawY = cy + (PHOTO_MAX_H - drawH) / 2;
+    rowMaxH = Math.max(rowMaxH, PHOTO_MAX_H);
 
-    setImportError(null);
-    setImportSuccess(null);
-    setImportBusy({ fileName: file.name });
+    // Cell background
+    doc.setFillColor(248, 245, 240);
+    doc.rect(cx, cy, PHOTO_CELL_W, PHOTO_MAX_H, 'F');
 
-    try {
-      // Read the file as an ArrayBuffer — works on web + Capacitor's webview.
-      const arrayBuffer = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(new Error('Failed to read file'));
-        reader.readAsArrayBuffer(file);
-      });
-
-      // Persist bytes. On native this writes to Directory.Data; on web we
-      // stash a blob URL so PDFs survive within-session but not across reloads.
-      const pdfId = uid();
-      let storedPath;
-      if (IS_NATIVE) {
-        const base64 = arrayBufferToBase64(arrayBuffer);
-        const fileName = `${pdfId}.pdf`;
-        const diskPath = `${PHOTO_ROOT}/${targetPropertyId}/pdfs/${fileName}`;
-        await Filesystem.writeFile({
-          path: diskPath,
-          data: base64,
-          directory: Directory.Data,
-          recursive: true,
-        });
-        storedPath = diskPath;
-      } else {
-        // Web fallback: stash a blob URL. pdfMerge.js fetches blob URLs natively.
-        const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
-        storedPath = URL.createObjectURL(blob);
-      }
-
-      // Read pageCount — best-effort, doesn't block attach if it fails.
-      let pageCount = null;
+    const imgData = photoDataMap.get(p.path || p.url || '');
+    if (imgData) {
       try {
-        pageCount = await readPdfPageCount(storedPath);
+        doc.addImage(imgData, 'JPEG', drawX, drawY, drawW, drawH);
       } catch {
-        // pdf-lib may reject corrupt or password-protected PDFs.
-        // Attach anyway — pdfMerge.mergePdfs will skip the file at bundle
-        // time if it can't be loaded, with the filename in the warning.
+        // image data invalid — placeholder bg already drawn
       }
-
-      const pdfRecord = {
-        id: pdfId,
-        fileName: file.name,
-        path: storedPath,
-        importedAt: new Date().toISOString(),
-        pageCount,
-      };
-
-      setPortfolio(prev => attachPdf(prev, targetPropertyId, pdfRecord));
-      setImportBusy(null);
-      setImportSuccess({
-        fileName: file.name,
-        pageCount,
-      });
-    } catch (e) {
-      console.error('PDF import failed:', e);
-      setImportError(e?.message || String(e));
-      setImportBusy(null);
+    } else {
+      doc.setTextColor(160, 155, 150);
+      doc.setFontSize(7); doc.setFont('helvetica', 'italic');
+      doc.text('photo unavailable', cx + PHOTO_CELL_W / 2, cy + PHOTO_MAX_H / 2, { align: 'center' });
     }
-  }, []);
 
-  // ─── Comparison PDF share — invoked from ChangesScreen ────────────────
-  // Builds the multi-inspection comparison PDF (item diff + photo galleries)
-  // and routes it through the right delivery mechanism for the platform.
-  // Native: write to Cache + Share.share. Web: doc.save().
-  const handleShareComparisonPDF = useCallback(async ({ inspections, diff, property }) => {
-    if (!inspections || inspections.length < 2) {
-      alert('Need at least 2 inspections to build a comparison report.');
-      return;
+    // Damaged-flag treatment — red border + FLAGGED badge top-right.
+    // Mirrors the app UI behavior for photos tagged via Tag Damages.
+    if (p.damaged) {
+      doc.setDrawColor(153, 27, 27);
+      doc.setLineWidth(0.8);
+      doc.rect(cx, cy, PHOTO_CELL_W, PHOTO_MAX_H, 'S');
+      doc.setLineWidth(0.2);
+
+      const badgeText = 'FLAGGED';
+      doc.setFontSize(6); doc.setFont('helvetica', 'bold');
+      const badgeW = doc.getTextWidth(badgeText) + 3;
+      const badgeX = cx + PHOTO_CELL_W - badgeW - 1.5;
+      const badgeY = cy + 1.5;
+      doc.setFillColor(153, 27, 27);
+      doc.roundedRect(badgeX, badgeY, badgeW, 4, 1, 1, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.text(badgeText, badgeX + badgeW / 2, badgeY + 2.8, { align: 'center' });
     }
-    try {
-      const doc = await buildComparisonPDF(inspections, diff, property, photoStore);
-      const safeName = (property?.name || 'Property').replace(/\s+/g, '-').replace(/[^A-Za-z0-9-_]/g, '');
-      const date = new Date().toISOString().slice(0, 10);
-      const fileName = `${safeName}-Comparison-${inspections.length}way-${date}.pdf`;
 
-      if (IS_NATIVE) {
-        const dataUri = doc.output('datauristring');
-        const base64 = dataUri.split(',')[1];
-        await Filesystem.writeFile({
-          path: fileName,
-          data: base64,
-          directory: Directory.Cache,
-          recursive: true,
-        });
-        const { uri } = await Filesystem.getUri({
-          path: fileName,
-          directory: Directory.Cache,
-        });
-        try {
-          await Share.share({
-            title: `Comparison — ${property?.name || 'Property'}`,
-            text: `${inspections.length}-way inspection comparison for ${property?.name || 'this property'}`,
-            url: uri,
-            dialogTitle: 'Share Comparison Report',
-          });
-        } catch (e) {
-          // User-cancelled share — swallow
-          const msg = String(e?.message || '');
-          if (!msg.includes('cancel') && !msg.includes('abort') && !msg.includes('dismiss')) throw e;
-        }
-      } else {
-        doc.save(fileName);
-      }
-    } catch (e) {
-      console.error('Comparison PDF export failed:', e);
-      alert('Comparison PDF export failed: ' + (e?.message || 'unknown error'));
-      throw e;  // rethrow so ChangesScreen can clear its busy state
+    // Single-line caption
+    const captionY = cy + PHOTO_MAX_H + 3;
+    doc.setTextColor(80, 80, 80);
+    doc.setFontSize(7); doc.setFont('helvetica', 'normal');
+    const caption = buildCaption(p);
+    doc.text(caption, cx, captionY, { maxWidth: PHOTO_CELL_W });
+
+    col++;
+    if (col === PHOTO_COLS) {
+      col = 0;
+      y = rowStartY + PHOTO_MAX_H + PHOTO_CAPTION_H + 4;
     }
-  }, [photoStore]);
-
-  // ─── Tenancy Findings PDF share — mirrors comparison PDF flow ────────
-  const handleShareFindingsPDF = useCallback(async ({ report, property, tenancy }) => {
-    if (!report || report.summary.itemCount === 0) {
-      alert('No findings to share — records show no items changed during this tenancy.');
-      return;
-    }
-    try {
-      const doc = await buildTenancyFindingsPDF(report, property, tenancy, photoStore);
-      const safeName = (property?.name || 'Property').replace(/\s+/g, '-').replace(/[^A-Za-z0-9-_]/g, '');
-      const date = new Date().toISOString().slice(0, 10);
-      const fileName = `${safeName}-Findings-${date}.pdf`;
-
-      if (IS_NATIVE) {
-        const dataUri = doc.output('datauristring');
-        const base64 = dataUri.split(',')[1];
-        await Filesystem.writeFile({
-          path: fileName,
-          data: base64,
-          directory: Directory.Cache,
-          recursive: true,
-        });
-        const { uri } = await Filesystem.getUri({
-          path: fileName,
-          directory: Directory.Cache,
-        });
-        try {
-          await Share.share({
-            title: `Findings — ${property?.name || 'Property'}`,
-            text: `Tenancy Findings report for ${property?.name || 'this property'}`,
-            url: uri,
-            dialogTitle: 'Share Tenancy Findings',
-          });
-        } catch (e) {
-          const msg = String(e?.message || '');
-          if (!msg.includes('cancel') && !msg.includes('abort') && !msg.includes('dismiss')) throw e;
-        }
-      } else {
-        doc.save(fileName);
-      }
-    } catch (e) {
-      console.error('Findings PDF export failed:', e);
-      alert('Findings PDF export failed: ' + (e?.message || 'unknown error'));
-      throw e;
-    }
-  }, [photoStore]);
-
-  // ─── Capture navigation helper ───────────────────────────────────────
-  // v0.3.0+ unified flow: every record routes to PhotoDocGridScreen by
-  // default (the canonical post-capture surface). Only the Pills button on
-  // a lease card or the Pills entry inside PhotoDocGridScreen routes to
-  // CaptureScreen — explicitly via opts.route='capture'. Anywhere else
-  // (Photo Document picker, inspection-card tap, attached-record open,
-  // Property Photos canonical record), the user lands on the flat-grid
-  // photodoc surface with Tag Rooms / Tag Damages / Pills / Generate PDF
-  // all reachable from there.
-  const handleCapture = useCallback((inspectionId, opts = {}) => {
-    const cam = opts.autoOpenCamera ? '?cam=1' : '';
-    const screen = opts.route === 'capture' ? 'capture' : 'photodoc';
-    navigate(`/${screen}/${route.propertyId}/${inspectionId}${cam}`);
-  }, [route.propertyId]);
-
-  // ─── Render ─────────────────────────────────────────────────────────
-  return (
-    <div style={{ background: THEME.bg, color: THEME.ink, minHeight: '100vh' }}>
-      {route.name === 'portfolio' && (
-        <PortfolioScreen
-          portfolio={portfolio}
-          setPortfolio={setPortfolio}
-          onOpenProperty={(id) => navigate(`/property/${id}`)}
-        />
-      )}
-      {route.name === 'property' && (
-        <PropertyScreen
-          portfolio={portfolio}
-          setPortfolio={setPortfolio}
-          propertyId={route.propertyId}
-          onBack={() => navigate('/')}
-          onCompare={(ids) => navigate(`/compare/${route.propertyId}/${ids.join('/')}`)}
-          onCapture={handleCapture}
-          onImportPdf={triggerImportPdf}
-          onTenancyFindings={(tenancyId) => navigate(`/findings/${route.propertyId}/${tenancyId}`)}
-          photoStore={photoStore}
-        />
-      )}
-      {route.name === 'capture' && (
-        <CaptureScreen
-          portfolio={portfolio}
-          setPortfolio={setPortfolio}
-          propertyId={route.propertyId}
-          inspectionId={route.inspectionId}
-          autoOpenCamera={route.autoOpenCamera}
-          onBack={() => navigate(`/property/${route.propertyId}`)}
-          photoStore={photoStore}
-        />
-      )}
-      {route.name === 'photodoc' && (
-        <PhotoDocGridScreen
-          portfolio={portfolio}
-          setPortfolio={setPortfolio}
-          propertyId={route.propertyId}
-          inspectionId={route.inspectionId}
-          autoOpenCamera={route.autoOpenCamera}
-          onBack={() => navigate(`/property/${route.propertyId}`)}
-          onOpenRatings={(inspectionId) =>
-            navigate(`/capture/${route.propertyId}/${inspectionId}`)
-          }
-          photoStore={photoStore}
-        />
-      )}
-      {route.name === 'compare' && (
-        <ChangesScreen
-          portfolio={portfolio}
-          propertyId={route.propertyId}
-          inspectionIds={route.inspectionIds}
-          onBack={() => navigate(`/property/${route.propertyId}`)}
-          onSharePDF={handleShareComparisonPDF}
-          photoStore={photoStore}
-        />
-      )}
-      {route.name === 'findings' && (
-        <TenancyFindingsScreen
-          portfolio={portfolio}
-          propertyId={route.propertyId}
-          tenancyId={route.tenancyId}
-          onBack={() => navigate(`/property/${route.propertyId}`)}
-          onSharePDF={handleShareFindingsPDF}
-          photoStore={photoStore}
-        />
-      )}
-
-      {/* Hidden file input for + Import PDF */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".pdf,application/pdf"
-        onChange={handlePdfPicked}
-        style={{ display: 'none' }}
-      />
-
-      {importBusy && <ImportBusyModal info={importBusy} />}
-
-      {importError && (
-        <ToastModal
-          kind="error"
-          title="Import failed"
-          body={importError}
-          onDismiss={() => setImportError(null)}
-        />
-      )}
-
-      {importSuccess && (
-        <ToastModal
-          kind="success"
-          title="PDF attached"
-          body={
-            `"${importSuccess.fileName}" is now attached to this property.` +
-            (importSuccess.pageCount
-              ? `\n\n${importSuccess.pageCount} page${importSuccess.pageCount === 1 ? '' : 's'} ready to bundle into your reports.`
-              : '\n\nReady to bundle into your reports.')
-          }
-          onDismiss={() => setImportSuccess(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ImportBusyModal — shown while a PDF is being read + written to disk
-// ═══════════════════════════════════════════════════════════════════════════
-function ImportBusyModal({ info }) {
-  return (
-    <div style={modalBackdrop}>
-      <div style={{
-        background: THEME.paper, borderRadius: 16, padding: 24,
-        maxWidth: 360, width: '100%',
-        border: `2px solid ${THEME.brand}`,
-        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
-        textAlign: 'center',
-      }}>
-        <div style={{ fontSize: 32, marginBottom: 8 }}>📄</div>
-        <div style={{ fontSize: 16, fontWeight: 700, color: THEME.brand, marginBottom: 6 }}>
-          Importing…
-        </div>
-        <div style={{ fontSize: 13, color: THEME.muted, lineHeight: 1.5, wordBreak: 'break-word' }}>
-          {info.fileName}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ToastModal — generic success/error popup
-// ═══════════════════════════════════════════════════════════════════════════
-function ToastModal({ kind, title, body, onDismiss }) {
-  const accent = kind === 'error' ? THEME.danger : THEME.brand2;
-  return (
-    <div style={modalBackdrop}>
-      <div style={{
-        background: THEME.paper, borderRadius: 16, padding: 24,
-        maxWidth: 420, width: '100%',
-        border: `2px solid ${accent}`,
-        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
-      }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: accent, marginBottom: 10 }}>{title}</div>
-        <div style={{ fontSize: 14, color: THEME.ink, whiteSpace: 'pre-wrap', marginBottom: 20, lineHeight: 1.5 }}>
-          {body}
-        </div>
-        <button onClick={onDismiss} style={{ ...btnPrimary, background: accent, width: '100%' }}>
-          Dismiss
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  // Chunk to avoid call stack overflow on large PDFs
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
   }
-  return btoa(binary);
+  if (col !== 0) {
+    y = rowStartY + PHOTO_MAX_H + PHOTO_CAPTION_H + 4;
+  }
+  return y;
 }
 
-// ─── Inline shared styles ──────────────────────────────────────────────
-const modalBackdrop = {
-  position: 'fixed', inset: 0, background: 'rgba(28, 25, 23, 0.6)',
-  display: 'flex', alignItems: 'center', justifyContent: 'center',
-  zIndex: 1000, padding: 24,
-};
+// Single-line caption: "May 6 · 39.7,-89.3" or "May 6"
+function buildCaption(photo) {
+  const parts = [];
+  if (photo.ts) parts.push(formatDateForCaption(photo.ts));
+  if (photo.lat && photo.lng) {
+    const lat = typeof photo.lat === 'number' ? photo.lat.toFixed(2) : String(photo.lat).slice(0, 6);
+    const lng = typeof photo.lng === 'number' ? photo.lng.toFixed(2) : String(photo.lng).slice(0, 6);
+    parts.push(`${lat},${lng}`);
+  }
+  return parts.join(' \u00B7 ');
+}
 
-const btnPrimary = {
-  background: THEME.brand, color: THEME.mint50, border: 'none', borderRadius: 10,
-  padding: '12px 18px', fontSize: 14, fontWeight: 600, cursor: 'pointer',
-};
-
-// ───────────────────────────────────────────────────────────────────────
-ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+function formatDateForCaption(ts) {
+  if (!ts) return '';
+  // Strategy: try Date.parse first (handles ISO format and "May 6, 09:16 PM"
+  // display format). If valid, format as "May 6". If parsing fails, the
+  // timestamp may be a free-form display string — fall back to taking just
+  // the leading "Mon D" segment (everything before the first comma) so the
+  // caption stays single-line.
+  const parsed = Date.parse(ts);
+  if (!isNaN(parsed)) {
+    const d = new Date(parsed);
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  }
+  const commaIdx = ts.indexOf(',');
+  if (commaIdx > 0) return ts.slice(0, commaIdx);
+  return ts;
+}
