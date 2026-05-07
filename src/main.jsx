@@ -388,7 +388,7 @@ function App() {
           inspectionId={route.inspectionId}
           autoOpenCamera={route.autoOpenCamera}
           onBack={() => navigate(`/property/${route.propertyId}`)}
-          onOpenPills={(inspectionId) =>
+          onOpenRatings={(inspectionId) =>
             navigate(`/capture/${route.propertyId}/${inspectionId}`)
           }
           photoStore={photoStore}
