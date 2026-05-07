@@ -47,6 +47,7 @@ import {
   ROOMS, STATUS,
   inspectionTypeById, formatDate,
 } from './constants.js';
+import { multiwayItemMatrix } from './diff.js';
 
 // Render constants — letter size in millimeters
 const PAGE_W = 215.9;
@@ -236,11 +237,20 @@ export async function buildComparisonPDF(inspections, diff, property, photoStore
   y += 28;
 
   // ─── Per-room diff sections ────────────────────────────────────────────
-  // 2-way diff renders the comparison body. N>2 (evidence bundles) skip the
-  // diff and rely on photo galleries at the end — the user is bundling
-  // records, not contrasting them.
+  // ─── Body branching by record count ─────────────────────────────────────
+  // N=2 with diff → existing 2-way table (worsened/improved column preserved
+  //                 — that's the dispute-grade asset for pairwise comparison)
+  // N=3-7        → new multiway matrix (per-item table with N status columns,
+  //                 highlight rows where statuses differ or any is damaged).
+  //                 Tenancy-agnostic — same engine works across tenancies.
+  // N=8+          → bundle stub. Per-item matrix with 8+ columns is unreadable;
+  //                 user is intentionally bundling, not comparing.
+  const MULTIWAY_LIMIT = 7;
   if (isTwoWay) {
     y = renderTwoWayBody(doc, y, checkY, diff);
+  } else if (inspections.length <= MULTIWAY_LIMIT) {
+    const matrix = multiwayItemMatrix(inspections);
+    y = renderMultiwayBody(doc, y, checkY, matrix);
   } else {
     y = checkY(y, 14);
     doc.setFillColor(248, 245, 240);
@@ -458,6 +468,162 @@ function renderTwoWayRoom(doc, y, checkY, rd) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// N-way body — per-item matrix with one status column per inspection
+// ═══════════════════════════════════════════════════════════════════════════
+// For 3-7 record comparisons. Reads from multiwayItemMatrix(). Each room is
+// a section: header band → column header row showing inspection labels (A, B,
+// C, ...) → per-item rows with N status badges. Rows where any two statuses
+// differ get a yellow wash; rows where any status is 'damaged' get a stronger
+// red wash that wins over the yellow.
+//
+// Visual hierarchy:
+//   - Damaged row (anyDamaged=true)  → red wash
+//   - Differing row (anyDiffer=true) → yellow wash
+//   - Otherwise                       → no wash (all rooms agree, all clean/etc.)
+function renderMultiwayBody(doc, y, checkY, matrix) {
+  if (!matrix || !matrix.rooms) return y;
+  const visibleRooms = matrix.rooms.filter(r => r.hasAnyContent);
+
+  if (visibleRooms.length === 0) {
+    y = checkY(y, 20);
+    doc.setFillColor(220, 252, 231);
+    doc.setDrawColor(167, 243, 208);
+    doc.roundedRect(MARGIN, y, COL_W, 16, 2, 2, 'FD');
+    doc.setTextColor(6, 95, 70);
+    doc.setFontSize(11); doc.setFont('helvetica', 'bold');
+    doc.text('No rated items in any of these records.', MARGIN + 4, y + 7);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.text('Add condition ratings (clean / fair / damaged / N-A) to populate this section.',
+             MARGIN + 4, y + 12);
+    y += 22;
+    return y;
+  }
+
+  // Section intro card — explains the matrix and column legend
+  y = checkY(y, 18);
+  doc.setFillColor(243, 240, 235);
+  doc.setDrawColor(231, 227, 220);
+  doc.roundedRect(MARGIN, y, COL_W, 14, 2, 2, 'FD');
+  doc.setTextColor(60, 60, 60);
+  doc.setFontSize(9); doc.setFont('helvetica', 'bold');
+  doc.text(`Item Matrix — ${matrix.inspections.length} records`, MARGIN + 4, y + 6);
+  doc.setFontSize(7); doc.setFont('helvetica', 'normal');
+  doc.text(
+    'Yellow = statuses differ across records. Red = at least one record marked damaged.',
+    MARGIN + 4, y + 11
+  );
+  y += 18;
+
+  for (const rd of visibleRooms) {
+    y = renderMultiwayRoom(doc, y, checkY, rd, matrix.inspections);
+  }
+  return y;
+}
+
+function renderMultiwayRoom(doc, y, checkY, rd, inspMeta) {
+  const N = inspMeta.length;
+  const itemColW = COL_W - (BADGE_W * N + (N - 1) * 1) - 6;  // remaining width for item label
+  const badgeStartX = MARGIN + 4 + itemColW + 4;
+
+  // Room header band
+  y = checkY(y, 22);
+  doc.setFillColor(...BRAND2_RGB);
+  doc.roundedRect(MARGIN, y, COL_W, 9, 2, 2, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(10); doc.setFont('helvetica', 'bold');
+  doc.text(rd.room.name, MARGIN + 4, y + 6);
+
+  // Right-side summary tally
+  const damagedItems = rd.items.filter(it => it.anyDamaged).length;
+  const differItems  = rd.items.filter(it => it.anyDiffer).length;
+  const tallyParts = [];
+  if (damagedItems > 0) tallyParts.push(`${damagedItems} damaged`);
+  if (differItems > 0) tallyParts.push(`${differItems} differ`);
+  if (tallyParts.length > 0) {
+    doc.setFontSize(7); doc.setFont('helvetica', 'normal');
+    doc.text(tallyParts.join(' | '), PAGE_W - MARGIN - 4, y + 6, { align: 'right' });
+  }
+  y += 12;
+
+  // Column header row — inspection labels above each badge column
+  if (rd.items.length > 0) {
+    doc.setTextColor(120, 113, 108);
+    doc.setFontSize(7); doc.setFont('helvetica', 'bold');
+    doc.text('ITEM', MARGIN + 2, y + 3);
+    for (let i = 0; i < N; i++) {
+      const cx = badgeStartX + i * (BADGE_W + 1) + BADGE_W / 2;
+      doc.text(inspMeta[i].sideLabel, cx, y + 3, { align: 'center' });
+    }
+    y += 5;
+
+    // Per-item rows
+    for (const item of rd.items) {
+      const labelLines = doc.splitTextToSize(item.label, itemColW);
+      const rowH = Math.max(5, labelLines.length * 4) + 1;
+      y = checkY(y, rowH);
+
+      // Row wash — red for damaged > yellow for differ > nothing
+      if (item.anyDamaged) {
+        doc.setFillColor(254, 226, 226);
+        doc.rect(MARGIN, y - 0.5, COL_W, rowH, 'F');
+      } else if (item.anyDiffer) {
+        doc.setFillColor(254, 249, 195);
+        doc.rect(MARGIN, y - 0.5, COL_W, rowH, 'F');
+      }
+
+      // Item label
+      doc.setTextColor(28, 25, 23);
+      doc.setFontSize(8); doc.setFont('helvetica', 'normal');
+      doc.text(labelLines, MARGIN + 2, y + 3);
+
+      // N status badges
+      for (let i = 0; i < N; i++) {
+        const cx = badgeStartX + i * (BADGE_W + 1) + BADGE_W / 2;
+        drawStatusBadge(doc, item.statuses[i], cx, y, BADGE_W);
+      }
+
+      y += rowH;
+    }
+    y += 2;
+  }
+
+  // Per-record notes for this room (if any)
+  if (rd.anyNotes) {
+    y = checkY(y, 8);
+    doc.setFillColor(254, 249, 195);
+    doc.rect(MARGIN, y, COL_W, 5, 'F');
+    doc.setTextColor(146, 64, 14);
+    doc.setFontSize(7); doc.setFont('helvetica', 'bold');
+    doc.text('NOTES', MARGIN + 3, y + 3.5);
+    y += 7;
+
+    for (let i = 0; i < N; i++) {
+      const note = rd.notes[i];
+      if (!note) continue;
+      const noteLines = doc.splitTextToSize(note, COL_W - 16);
+      y = checkY(y, noteLines.length * 4 + 2);
+      const sourceColor = inspMeta[i].source === 'tenant' ? TENANT_RGB : LANDLORD_RGB;
+      doc.setTextColor(...sourceColor);
+      doc.setFontSize(7); doc.setFont('helvetica', 'bold');
+      doc.text(`${inspMeta[i].sideLabel}:`, MARGIN + 2, y + 3);
+      doc.setTextColor(60, 60, 60);
+      doc.setFont('helvetica', 'italic');
+      doc.text(noteLines, MARGIN + 10, y + 3);
+      y += noteLines.length * 4 + 1;
+    }
+    y += 2;
+  }
+
+  y += 4;
+  return y;
+}
+
+// Width of a single status badge in the multiway matrix.
+// Tuned so 7 columns + item label fit cleanly within COL_W.
+const BADGE_W = 14;
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Status badge — small colored pill matching STATUS visual
 // ═══════════════════════════════════════════════════════════════════════════
 function drawStatusBadge(doc, status, x, y, w) {
@@ -571,6 +737,27 @@ function renderInspectionGallery(doc, y, checkY, inspection, idx, photoDataMap) 
       doc.setTextColor(160, 155, 150);
       doc.setFontSize(7); doc.setFont('helvetica', 'italic');
       doc.text('photo unavailable', cx + PHOTO_CELL_W / 2, cy + PHOTO_MAX_H / 2, { align: 'center' });
+    }
+
+    // Damaged-flag treatment: red border around cell + FLAGGED badge top-right.
+    // Mirrors the app UI's red outline + badge for photos tagged via Tag Damages.
+    // ASCII text only — jsPDF helvetica can't render the warning emoji.
+    if (p.damaged) {
+      doc.setDrawColor(153, 27, 27);
+      doc.setLineWidth(0.8);
+      doc.rect(cx, cy, PHOTO_CELL_W, PHOTO_MAX_H, 'S');
+      doc.setLineWidth(0.2);  // restore default for subsequent strokes
+
+      // FLAGGED pill — top-right corner, slightly inset
+      const badgeText = 'FLAGGED';
+      doc.setFontSize(6); doc.setFont('helvetica', 'bold');
+      const badgeW = doc.getTextWidth(badgeText) + 3;
+      const badgeX = cx + PHOTO_CELL_W - badgeW - 1.5;
+      const badgeY = cy + 1.5;
+      doc.setFillColor(153, 27, 27);
+      doc.roundedRect(badgeX, badgeY, badgeW, 4, 1, 1, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.text(badgeText, badgeX + badgeW / 2, badgeY + 2.8, { align: 'center' });
     }
 
     // Single-line caption beneath the cell (date + GPS or just date)
