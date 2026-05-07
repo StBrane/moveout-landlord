@@ -670,6 +670,8 @@ function TenancySection({
   onDeleteInspection, onOpenInspection, onCreateInspection, onTenancyFindings,
 }) {
   const tenantNames = tenancy.tenants?.length > 0 ? tenancy.tenants.join(', ') : '(unnamed tenant)';
+  // Tenancy Findings info modal — explains the rating requirement
+  const [findingsInfoOpen, setFindingsInfoOpen] = useState(false);
 
   // Sort inspections by lifecycle order
   const TYPE_ORDER = {
@@ -795,20 +797,43 @@ function TenancySection({
               .filter(i => canonicalKinds.has(i.type)).length;
             if (canonicalCount < 2) return null;
             return (
-              <button
-                onClick={onTenancyFindings}
-                style={{
-                  background: THEME.brand, color: THEME.mint300,
-                  border: `1px solid ${THEME.brand}`, borderRadius: 12,
-                  padding: '12px 16px', fontSize: 13, fontWeight: 700,
-                  cursor: 'pointer', width: '100%',
-                  marginTop: 12,
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                }}
-              >
-                <span style={{ fontSize: 15 }}>📊</span>
-                <span>View Tenancy Findings</span>
-              </button>
+              <div style={{
+                marginTop: 12, display: 'flex', gap: 6, alignItems: 'stretch',
+              }}>
+                <button
+                  onClick={onTenancyFindings}
+                  style={{
+                    flex: 1,
+                    background: THEME.brand, color: THEME.mint300,
+                    border: `1px solid ${THEME.brand}`, borderRadius: 12,
+                    padding: '12px 16px', fontSize: 13, fontWeight: 700,
+                    cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  }}
+                >
+                  <span style={{ fontSize: 15 }}>📊</span>
+                  <span>View Tenancy Findings</span>
+                </button>
+                {/* Info icon — explains the rating requirement for findings.
+                    Findings synthesizes evidence tiers from per-item ratings
+                    across records. Without ratings, the report says "no
+                    findings" and the user wonders why. The icon surfaces the
+                    requirement before they tap and get confused. */}
+                <button
+                  onClick={() => setFindingsInfoOpen(true)}
+                  aria-label="What is Tenancy Findings?"
+                  style={{
+                    background: 'rgba(43, 106, 79, 0.12)',
+                    color: THEME.brand,
+                    border: `1px solid ${THEME.mint300}`, borderRadius: 12,
+                    padding: '0 14px', fontSize: 16, fontWeight: 700,
+                    cursor: 'pointer', minWidth: 44,
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  }}
+                >
+                  i
+                </button>
+              </div>
             );
           })()}
 
@@ -822,6 +847,82 @@ function TenancySection({
           </button>
         </div>
       )}
+
+      {findingsInfoOpen && (
+        <FindingsInfoModal onClose={() => setFindingsInfoOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FindingsInfoModal — explains the rating requirement for Tenancy Findings
+// ═══════════════════════════════════════════════════════════════════════════
+// Surfaced from the (i) icon next to the Tenancy Findings button on a lease
+// card. The synthesis engine reads condition ratings (clean / fair / N/A /
+// damaged) from records' rooms[id][slot].statuses. Without ratings, the
+// engine has nothing to classify and the report says "no findings". This
+// modal explains the requirement up front so users know what to do.
+function FindingsInfoModal({ onClose }) {
+  return (
+    <div style={modalBackdrop} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{
+        background: THEME.paper, borderRadius: 16, padding: 24,
+        maxWidth: 460, width: '100%',
+        border: `2px solid ${THEME.brand}`,
+        boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
+        maxHeight: '85vh', overflowY: 'auto',
+      }}>
+        <div style={{
+          fontSize: 13, color: THEME.muted, fontWeight: 600,
+          marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5,
+        }}>
+          Tenancy Findings
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: THEME.ink, marginBottom: 14 }}>
+          What this report does
+        </div>
+
+        <div style={{ fontSize: 13, color: THEME.ink, lineHeight: 1.6, marginBottom: 14 }}>
+          Tenancy Findings synthesizes <strong>evidence tiers</strong> across the records of
+          this lease — Bulletproof, Strong, Disputed — based on what each party documented
+          and whether photos corroborate the timeline. The report tells you which deductions
+          are court-ready and which are circumstantial.
+        </div>
+
+        <div style={{
+          background: THEME.mint50, border: `1px solid ${THEME.mint300}`,
+          borderRadius: 10, padding: 12, marginBottom: 14,
+        }}>
+          <div style={{
+            fontSize: 11, fontWeight: 700, color: THEME.brand,
+            textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6,
+          }}>
+            Required for findings
+          </div>
+          <div style={{ fontSize: 12.5, color: THEME.ink, lineHeight: 1.55 }}>
+            The engine reads <strong>item ratings</strong> (clean / fair / N-A / damaged)
+            from each record's per-room items. Photos alone aren't enough — the rating is
+            the structured signal the engine compares across records.
+          </div>
+          <div style={{ fontSize: 12.5, color: THEME.ink, lineHeight: 1.55, marginTop: 8 }}>
+            To populate findings, open a record, tap{' '}
+            <strong style={{ color: THEME.brand }}>🪄 Rate items</strong>, walk through
+            each room, and tap each item's status pill. Do this for at least 2 canonical
+            records (Baseline, Mid-lease, Post-tenant) and the report will surface real
+            findings.
+          </div>
+        </div>
+
+        <div style={{ fontSize: 11.5, color: THEME.muted, lineHeight: 1.55, marginBottom: 18 }}>
+          Without ratings, the report shows "no findings" — even if you have hundreds of
+          photos. Photos are the corroborating evidence layer; ratings are what get compared.
+        </div>
+
+        <button onClick={onClose} style={{ ...btnPrimary, marginTop: 0 }}>
+          Got it
+        </button>
+      </div>
     </div>
   );
 }
