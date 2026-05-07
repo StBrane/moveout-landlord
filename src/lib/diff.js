@@ -1,33 +1,31 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // diff.js — inspection comparison engine
+// v0.4 — adds multiwayItemMatrix for N≥3 record comparisons
 // ═══════════════════════════════════════════════════════════════════════════
-// Given two inspections A and B (in any combination of landlord/tenant,
-// move-in/move-out), compute a structured diff that the Changes view can
-// render. Handles all four comparison modes from the synopsis:
+// Two public entry points:
 //
-//   1. Landlord baseline vs. tenant move-in
-//   2. Landlord baseline vs. landlord post-tenant
-//   3. Tenant move-in vs. tenant move-out
-//   4. Landlord post-tenant vs. tenant move-out
+//   diffInspections(a, b)  — pairwise diff. Each item classified as
+//                            unchanged/added/removed/improved/worsened/mixed.
+//                            Used by 2-way comparison PDFs.
 //
-// The engine doesn't care which side is "before" — caller labels them.
-// Convention throughout this module: A is the "before" (earlier) inspection,
-// B is the "after" (later) inspection.
+//   multiwayItemMatrix(insps) — N-record table. Each row has N status columns
+//                                with no cross-record classification. Highlight
+//                                rows where statuses differ. Used by 3+ record
+//                                comparison PDFs. Tenancy-agnostic — works
+//                                across tenancies.
 //
-// Each inspection stores data in rooms[roomId].{moveIn|moveOut}. Because
-// imported tenant bundles are split by phase at import time, a tenant_move_in
-// inspection has its data in the moveIn slot (and moveOut is empty), and a
-// tenant_move_out has data in moveOut (moveIn empty). Landlord inspections
-// typically use the moveIn slot as the "single phase" for that inspection type.
-//
-// For compare purposes we resolve each inspection's active phase automatically.
+// Helpers also exported:
+//   activePhase(inspection)        — auto-detect moveIn vs moveOut
+//   changedItemsOnly(diff)          — filter 2-way result to changes only
+//   worsenedItemsOnly(diff)         — filter 2-way result to worsening only
+//   changeTypeMeta(changeType)      — UI rendering hints
+//   statusMeta(statusId)            — STATUS lookup bridge
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { ROOMS, STATUS } from './constants.js';
 
 // ───────────────────────────────────────────────────────────────────────────
-// Decide which phase of the inspection object holds real data.
-// Returns 'moveIn' | 'moveOut' | null.
+// Active phase detection
 // ───────────────────────────────────────────────────────────────────────────
 export function activePhase(inspection) {
   if (!inspection || !inspection.rooms) return null;
@@ -50,30 +48,7 @@ function countPhaseData(phase) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Main diff function.
-//
-// Returns:
-//   {
-//     rooms: [
-//       {
-//         room: { id, name, icon, items },
-//         items: [
-//           {
-//             index, label,
-//             a: { status, present },
-//             b: { status, present },
-//             changeType: 'unchanged' | 'added' | 'removed' | 'improved' | 'worsened' | 'mixed'
-//           },
-//           ...
-//         ],
-//         notes: { a, b, changed },
-//         photos: { a: [...], b: [...] },  // photo metadata for side-by-side render
-//         summary: { total, unchanged, added, removed, improved, worsened }
-//       },
-//       ...
-//     ],
-//     summary: { totalItems, changedItems, worsenedItems, improvedItems, photosA, photosB }
-//   }
+// 2-way diff
 // ───────────────────────────────────────────────────────────────────────────
 export function diffInspections(a, b, opts = {}) {
   const phaseA = opts.phaseA || activePhase(a);
@@ -157,7 +132,7 @@ export function diffInspections(a, b, opts = {}) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Severity ordering for status transitions. Higher = worse.
+// Severity ordering — higher = worse
 // ───────────────────────────────────────────────────────────────────────────
 const STATUS_SEVERITY = {
   clean:   0,
@@ -168,18 +143,115 @@ const STATUS_SEVERITY = {
 
 function classifyChange(a, b) {
   if (a == null && b == null) return 'unchanged';
-  if (a == null && b != null) return 'added';      // B rated it, A didn't
-  if (a != null && b == null) return 'removed';    // A rated it, B didn't
+  if (a == null && b != null) return 'added';
+  if (a != null && b == null) return 'removed';
   if (a === b) return 'unchanged';
   const sevA = STATUS_SEVERITY[a] ?? 0;
   const sevB = STATUS_SEVERITY[b] ?? 0;
   if (sevB > sevA) return 'worsened';
   if (sevB < sevA) return 'improved';
-  return 'mixed';  // same severity, different status (e.g. fair ↔ na)
+  return 'mixed';
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Filter helpers for rendering — narrow the diff to just changes.
+// N-record matrix — for 3+ comparisons
+// ───────────────────────────────────────────────────────────────────────────
+// Returns a per-room, per-item table with one status column per inspection.
+// No cross-record classification — caller decides how to render. Each item
+// row carries:
+//   - statuses: array of N status values (null if unrated in that record)
+//   - anyDiffer: true if any two non-null values disagree (e.g. clean vs damaged)
+//   - anyDamaged: true if any value === 'damaged'
+//   - allUnrated: true if every value is null (item skipped from output)
+//   - hasAnyContent: true if any value is non-null
+//
+// Used by comparisonPDF.js for N=3-7 records. N=8+ falls through to the
+// bundle-only path (per-item matrix gets unreadable past ~7 columns).
+//
+// Tenancy-agnostic: reads each inspection independently. Cross-tenancy
+// comparisons work the same as same-tenancy.
+// ───────────────────────────────────────────────────────────────────────────
+export function multiwayItemMatrix(inspections, opts = {}) {
+  if (!Array.isArray(inspections) || inspections.length < 2) {
+    return { rooms: [], inspections: [], summary: { totalItems: 0, anyDifferCount: 0, anyDamagedCount: 0 } };
+  }
+
+  const phases = inspections.map((insp, i) => opts.phases?.[i] || activePhase(insp));
+  const inspMeta = inspections.map((insp, i) => ({
+    label: insp.label || `Inspection ${i + 1}`,
+    sideLabel: String.fromCharCode(65 + i),  // A, B, C, ...
+    source: insp.source || 'landlord',
+    phase: phases[i],
+  }));
+
+  const roomResults = [];
+  let totalItems = 0, anyDifferCount = 0, anyDamagedCount = 0;
+
+  for (const roomDef of ROOMS) {
+    const itemResults = [];
+    let roomHasContent = false;
+
+    for (let i = 0; i < roomDef.items.length; i++) {
+      const statuses = inspections.map((insp, idx) => {
+        const phase = phases[idx];
+        if (!phase) return null;
+        return insp?.rooms?.[roomDef.id]?.[phase]?.statuses?.[i] ?? null;
+      });
+
+      const nonNull = statuses.filter(s => s != null);
+      const allUnrated = nonNull.length === 0;
+      if (allUnrated) continue;  // skip items nobody rated
+
+      // anyDiffer: are there at least two non-null values that disagree?
+      let anyDiffer = false;
+      if (nonNull.length >= 2) {
+        const first = nonNull[0];
+        anyDiffer = nonNull.some(s => s !== first);
+      }
+      const anyDamaged = nonNull.includes('damaged');
+
+      itemResults.push({
+        index: i,
+        label: roomDef.items[i],
+        statuses,
+        anyDiffer,
+        anyDamaged,
+        allUnrated: false,
+        hasAnyContent: true,
+      });
+
+      totalItems++;
+      if (anyDiffer) anyDifferCount++;
+      if (anyDamaged) anyDamagedCount++;
+      roomHasContent = true;
+    }
+
+    // Notes per inspection for this room
+    const notes = inspections.map((insp, idx) => {
+      const phase = phases[idx];
+      if (!phase) return '';
+      return (insp?.rooms?.[roomDef.id]?.[phase]?.notes || '').trim();
+    });
+    const anyNotes = notes.some(n => n.length > 0);
+
+    roomResults.push({
+      room: roomDef,
+      items: itemResults,
+      notes,
+      anyNotes,
+      hasAnyContent: roomHasContent || anyNotes,
+    });
+  }
+
+  return {
+    rooms: roomResults,
+    inspections: inspMeta,
+    summary: { totalItems, anyDifferCount, anyDamagedCount },
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Filter helpers for 2-way diff
 // ───────────────────────────────────────────────────────────────────────────
 export function changedItemsOnly(diff) {
   return {
@@ -206,16 +278,16 @@ export function worsenedItemsOnly(diff) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Helpers for UI rendering
+// UI rendering helpers
 // ───────────────────────────────────────────────────────────────────────────
 export function changeTypeMeta(changeType) {
   switch (changeType) {
-    case 'unchanged': return { label: 'No change',       color: '#64748B', icon: '—' };
+    case 'unchanged': return { label: 'No change',       color: '#64748B', icon: '-' };
     case 'added':     return { label: 'Newly rated',     color: '#3B82F6', icon: '+' };
-    case 'removed':   return { label: 'No longer rated', color: '#64748B', icon: '−' };
-    case 'improved':  return { label: 'Improved',        color: '#10B981', icon: '↑' };
-    case 'worsened':  return { label: 'Worsened',        color: '#EF4444', icon: '↓' };
-    case 'mixed':     return { label: 'Changed',         color: '#F59E0B', icon: '≠' };
+    case 'removed':   return { label: 'No longer rated', color: '#64748B', icon: '-' };
+    case 'improved':  return { label: 'Improved',        color: '#10B981', icon: 'up' };
+    case 'worsened':  return { label: 'Worsened',        color: '#EF4444', icon: 'dn' };
+    case 'mixed':     return { label: 'Changed',         color: '#F59E0B', icon: '!' };
     default:          return { label: changeType,        color: '#94A3B8', icon: '?' };
   }
 }
