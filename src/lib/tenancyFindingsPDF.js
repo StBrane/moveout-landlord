@@ -552,6 +552,25 @@ function renderInspectionGallery(doc, y, checkY, inspection, kindKey, photoDataM
       doc.text('photo unavailable', cx + PHOTO_CELL_W / 2, cy + PHOTO_MAX_H / 2, { align: 'center' });
     }
 
+    // Damaged-flag treatment — red border + FLAGGED badge top-right.
+    // Mirrors the app UI behavior for photos tagged via Tag Damages.
+    if (p.damaged) {
+      doc.setDrawColor(153, 27, 27);
+      doc.setLineWidth(0.8);
+      doc.rect(cx, cy, PHOTO_CELL_W, PHOTO_MAX_H, 'S');
+      doc.setLineWidth(0.2);
+
+      const badgeText = 'FLAGGED';
+      doc.setFontSize(6); doc.setFont('helvetica', 'bold');
+      const badgeW = doc.getTextWidth(badgeText) + 3;
+      const badgeX = cx + PHOTO_CELL_W - badgeW - 1.5;
+      const badgeY = cy + 1.5;
+      doc.setFillColor(153, 27, 27);
+      doc.roundedRect(badgeX, badgeY, badgeW, 4, 1, 1, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.text(badgeText, badgeX + badgeW / 2, badgeY + 2.8, { align: 'center' });
+    }
+
     // Single-line caption
     const captionY = cy + PHOTO_MAX_H + 3;
     doc.setTextColor(80, 80, 80);
