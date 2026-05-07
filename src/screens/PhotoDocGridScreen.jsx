@@ -30,7 +30,7 @@
 //   │   [+ More photos]                        │
 //   │   [Tag rooms (N untagged)]               │
 //   │   [Tag damages (N flagged)]              │
-//   │   [Pills — open per-room editor]         │
+//   │   [Rate items — open per-room editor]     │
 //   │   [Generate PDF]                         │
 //   │   [Save & Return]                        │
 //   └──────────────────────────────────────────┘
@@ -73,7 +73,7 @@ const DEFAULT_ROOM_ID = 'other';
 
 export default function PhotoDocGridScreen({
   portfolio, setPortfolio, propertyId, inspectionId,
-  onBack, onOpenPills, autoOpenCamera, photoStore,
+  onBack, onOpenRatings, autoOpenCamera, photoStore,
 }) {
   const property = getProperty(portfolio, propertyId);
   const inspection = getInspection(portfolio, propertyId, inspectionId);
@@ -448,7 +448,7 @@ export default function PhotoDocGridScreen({
       </header>
 
       {/* ─── ACTION BUTTONS AT TOP ──────────────────────────────────────── */}
-      {/* All actions sit above the gallery — Tag rooms / Tag damages / Pills /
+      {/* All actions sit above the gallery — Tag rooms / Tag damages / Rate items /
           + More photos / Generate PDF. The user reads "what can I do?" first,
           then the gallery as evidence below. */}
       <div style={{
@@ -489,10 +489,10 @@ export default function PhotoDocGridScreen({
         </button>
 
         <button
-          onClick={() => onOpenPills && onOpenPills(inspectionId)}
+          onClick={() => onOpenRatings && onOpenRatings(inspectionId)}
           style={btnSecondaryAccent}
         >
-          🪄 Pills · open per-room editor
+          🪄 Rate items · open per-room editor
         </button>
       </div>
 
@@ -581,9 +581,9 @@ export default function PhotoDocGridScreen({
       )}
 
       {/* ─── PILLS SUMMARY (bottom — only if rated items or notes exist) ── */}
-      <PillsSummaryBlock
+      <RatingsSummaryBlock
         inspection={inspection}
-        onOpenPills={onOpenPills}
+        onOpenRatings={onOpenRatings}
         inspectionId={inspectionId}
       />
 
@@ -647,19 +647,20 @@ export default function PhotoDocGridScreen({
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PillsSummaryBlock — per-room summary of rated items, shown below the gallery
+// RatingsSummaryBlock — per-room summary of rated items, shown below the gallery
 // ═══════════════════════════════════════════════════════════════════════════
 // Renders only when at least one room has rated items or notes. Each room
 // gets a card with: room icon + name, count of rated items, count of damaged
-// items, count of notes characters. Tapping the card opens the Pills editor
-// (CaptureScreen) for this record so the user can edit pills for any room.
+// items, count of notes characters. Tapping the card opens the Rate items
+// editor (CaptureScreen) for this record so the user can edit ratings for
+// any room.
 //
 // Rationale: this gives the user a quick "what's on this record" view from
-// the photodoc grid without having to enter the full Pills editor. Read-only
-// summary; tap to edit.
-function PillsSummaryBlock({ inspection, onOpenPills, inspectionId }) {
+// the photodoc grid without having to enter the full Rate items editor.
+// Read-only summary; tap to edit.
+function RatingsSummaryBlock({ inspection, onOpenRatings, inspectionId }) {
   // Walk every room slot and tally rated/damaged/notes
-  const summary = collectPillsSummary(inspection);
+  const summary = collectRatingsSummary(inspection);
 
   if (summary.length === 0) {
     // Don't render anything — no pills work has been done on this record
@@ -674,7 +675,7 @@ function PillsSummaryBlock({ inspection, onOpenPills, inspectionId }) {
         marginBottom: 6, paddingLeft: 4,
         display: 'flex', alignItems: 'center', gap: 6,
       }}>
-        <span>🪄 Pills</span>
+        <span>🪄 Rate items</span>
         <span style={{ color: THEME.muted2, fontWeight: 500, textTransform: 'none', letterSpacing: 0 }}>
           · tap to edit
         </span>
@@ -684,7 +685,7 @@ function PillsSummaryBlock({ inspection, onOpenPills, inspectionId }) {
         {summary.map(row => (
           <button
             key={`${row.roomId}_${row.slot}`}
-            onClick={() => onOpenPills && onOpenPills(inspectionId)}
+            onClick={() => onOpenRatings && onOpenRatings(inspectionId)}
             style={{
               background: THEME.paper,
               border: `1px solid ${row.damaged > 0 ? THEME.danger : THEME.edge}`,
@@ -725,7 +726,7 @@ function PillsSummaryBlock({ inspection, onOpenPills, inspectionId }) {
 
 // Walk inspection.rooms → produce one row per (roomId, slot) that has any
 // rated items or notes. Skip rooms with no engagement at all.
-function collectPillsSummary(inspection) {
+function collectRatingsSummary(inspection) {
   if (!inspection?.rooms) return [];
   const out = [];
   for (const room of ROOMS) {
