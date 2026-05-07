@@ -96,7 +96,16 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
 
   const doc = new jsPDF({ unit: 'mm', format: 'letter' });
   let y = 20;
-  const checkY = (n = 10) => { if (y + n > FOOTER_LIMIT) { doc.addPage(); y = 20; } };
+  // checkY is PURE: takes current y, returns possibly-new y after page break.
+  // Callers must reassign: `y = checkY(y, n)`. See comparisonPDF.js for the
+  // closure-capture bug this pattern fixes.
+  const checkY = (currentY, n = 10) => {
+    if (currentY + n > FOOTER_LIMIT) {
+      doc.addPage();
+      return 20;
+    }
+    return currentY;
+  };
 
   // ─── Header band ─────────────────────────────────────────────────────────
   doc.setFillColor(...BRAND_RGB);
@@ -115,7 +124,7 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
 
   // ─── Tenancy context block (if attached to a tenancy) ───────────────────
   if (tenancy) {
-    checkY(28);
+    y = checkY(y, 28);
     doc.setFillColor(248, 245, 240); doc.setDrawColor(196, 181, 165);
     doc.roundedRect(MARGIN, y, COL_W, 22, 3, 3, 'FD');
     doc.setTextColor(...BRAND_RGB);
@@ -138,7 +147,7 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
   // ─── State law block ────────────────────────────────────────────────────
   if (inspection.stateIdx != null && STATE_LAWS[inspection.stateIdx]) {
     const sl = STATE_LAWS[inspection.stateIdx];
-    checkY(26);
+    y = checkY(y, 26);
     doc.setFillColor(239, 246, 255); doc.setDrawColor(147, 197, 253);
     doc.roundedRect(MARGIN, y, COL_W, 22, 3, 3, 'FD');
     doc.setTextColor(30, 64, 175);
@@ -179,7 +188,7 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
       fg: damagedCount > 0 ? [153, 27, 27] : [6, 95, 70] },
     { label: 'Inspected\nOn', value: formatDate(inspection.createdAt), bg: [219, 234, 254], fg: [30, 64, 175] },
   ];
-  checkY(24);
+  y = checkY(y, 24);
   const bW = (COL_W - 9) / 4;
   boxes.forEach((b, i) => {
     const bx = MARGIN + i * (bW + 3);
@@ -207,7 +216,7 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
     if (!statusKeys.length && !hasNotes && !hasPhotos) continue;
 
     // Room header band — emoji-stripped (rm.name only)
-    checkY(20);
+    y = checkY(y, 20);
     doc.setFillColor(...BRAND2_RGB);
     doc.roundedRect(MARGIN, y, COL_W, 10, 2, 2, 'F');
     doc.setTextColor(255, 255, 255);
@@ -220,7 +229,7 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
       rm.items.forEach((item, i) => {
         const st = phaseData.statuses[i];
         if (!st) return;
-        checkY(6);
+        y = checkY(y, 6);
         const clr = STATUS_RGB[st] || [80, 80, 80];
         doc.setTextColor(...clr);
         doc.setFontSize(8); doc.setFont('helvetica', 'bold');
@@ -236,7 +245,7 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
 
     // Notes
     if (hasNotes) {
-      checkY(8);
+      y = checkY(y, 8);
       doc.setFillColor(254, 249, 195);
       doc.rect(MARGIN, y, COL_W, 6, 'F');
       doc.setTextColor(146, 64, 14);
@@ -245,14 +254,14 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
       y += 8;
       const nl = doc.splitTextToSize(phaseData.notes, COL_W - 4);
       doc.setTextColor(80, 60, 0); doc.setFontSize(8); doc.setFont('helvetica', 'normal');
-      checkY(nl.length * 4.5);
+      y = checkY(y, nl.length * 4.5);
       doc.text(nl, MARGIN + 2, y);
       y += nl.length * 4.5 + 2;
     }
 
     // Photos (Variant C 4-up letterbox grid)
     if (hasPhotos) {
-      checkY(10);
+      y = checkY(y, 10);
       doc.setTextColor(...BRAND_RGB); doc.setFontSize(8); doc.setFont('helvetica', 'bold');
       doc.text(`${phaseData.photos.length} photo(s)`, MARGIN + 2, y);
       y += 6;
@@ -295,7 +304,7 @@ function renderPhotoGrid(doc, y, checkY, photos, photoDataMap) {
 
   for (const p of photos) {
     if (col === 0) {
-      checkY(PHOTO_MAX_H + PHOTO_CAPTION_H + 4);
+      y = checkY(y, PHOTO_MAX_H + PHOTO_CAPTION_H + 4);
       rowStartY = y;
       rowMaxH = 0;
     }
@@ -368,9 +377,17 @@ function buildCaption(photo) {
 
 function formatDateForCaption(ts) {
   if (!ts) return '';
-  if (/^\d{4}-\d{2}-\d{2}T/.test(ts)) {
-    const d = new Date(ts);
+  // Strategy: try Date.parse first (handles ISO format and "May 6, 09:16 PM"
+  // display format). If valid, format as "May 6". If parsing fails, the
+  // timestamp may be a free-form display string — fall back to taking just
+  // the leading "Mon D" segment (everything before the first comma) so the
+  // caption stays single-line.
+  const parsed = Date.parse(ts);
+  if (!isNaN(parsed)) {
+    const d = new Date(parsed);
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   }
+  const commaIdx = ts.indexOf(',');
+  if (commaIdx > 0) return ts.slice(0, commaIdx);
   return ts;
 }
