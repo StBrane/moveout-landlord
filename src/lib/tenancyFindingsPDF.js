@@ -152,7 +152,16 @@ export async function buildTenancyFindingsPDF(report, property, tenancy, photoSt
 
   const doc = new jsPDF({ unit: 'mm', format: 'letter' });
   let y = 20;
-  const checkY = (n = 10) => { if (y + n > FOOTER_LIMIT) { doc.addPage(); y = 20; } };
+  // checkY is PURE: takes current y, returns possibly-new y after page break.
+  // Callers must reassign: `y = checkY(y, n)`. See comparisonPDF.js for the
+  // closure-capture bug this pattern fixes.
+  const checkY = (currentY, n = 10) => {
+    if (currentY + n > FOOTER_LIMIT) {
+      doc.addPage();
+      return 20;
+    }
+    return currentY;
+  };
 
   // ─── Header band ────────────────────────────────────────────────────────
   doc.setFillColor(...BRAND_RGB);
@@ -172,7 +181,7 @@ export async function buildTenancyFindingsPDF(report, property, tenancy, photoSt
 
   // ─── Tenancy block ──────────────────────────────────────────────────────
   if (tenancy) {
-    checkY(28);
+    y = checkY(y, 28);
     doc.setFillColor(248, 245, 240); doc.setDrawColor(196, 181, 165);
     doc.roundedRect(MARGIN, y, COL_W, 22, 3, 3, 'FD');
     doc.setTextColor(...BRAND_RGB);
@@ -188,7 +197,7 @@ export async function buildTenancyFindingsPDF(report, property, tenancy, photoSt
   }
 
   // ─── Evidence tier card ─────────────────────────────────────────────────
-  checkY(28);
+  y = checkY(y, 28);
   doc.setFillColor(236, 253, 245); doc.setDrawColor(167, 243, 208);
   doc.roundedRect(MARGIN, y, COL_W, 24, 3, 3, 'FD');
   doc.setTextColor(...BRAND_RGB);
@@ -212,7 +221,7 @@ export async function buildTenancyFindingsPDF(report, property, tenancy, photoSt
     { key: 'landlordPostTenant', label: 'Landlord post-tenant', present: !!report.records.landlordPostTenant },
     { key: 'tenantMoveOut',      label: 'Tenant move-out',      present: !!report.records.tenantMoveOut },
   ];
-  checkY(8);
+  y = checkY(y, 8);
   doc.setTextColor(120, 113, 108);
   doc.setFontSize(7); doc.setFont('helvetica', 'bold');
   doc.text('RECORDS USED', MARGIN, y + 3);
@@ -243,7 +252,7 @@ export async function buildTenancyFindingsPDF(report, property, tenancy, photoSt
 
   // ─── Per-tier body ──────────────────────────────────────────────────────
   if (report.summary.itemCount === 0) {
-    checkY(20);
+    y = checkY(y, 20);
     doc.setFillColor(220, 252, 231);
     doc.setDrawColor(167, 243, 208);
     doc.roundedRect(MARGIN, y, COL_W, 16, 2, 2, 'FD');
@@ -322,7 +331,7 @@ function renderTierSection(doc, y, checkY, tier, items) {
   const tierBg = TIER_BG_RGB[tier] || [240, 240, 240];
 
   // Tier header band
-  checkY(16);
+  y = checkY(y, 16);
   doc.setFillColor(...tierFg);
   doc.roundedRect(MARGIN, y, COL_W, 11, 2, 2, 'F');
   doc.setTextColor(255, 255, 255);
@@ -366,7 +375,7 @@ function renderFindingRow(doc, y, checkY, item, tierBgRgb, tierFgRgb) {
   const detailH = detailLines.length > 0 ? detailLines.length * 4 + 2 : 0;
   const partyH = partyEntries.length > 0 ? partyEntries.length * 4.5 + 4 : 0;
   const totalH = headerH + detailH + partyH + 4;
-  checkY(totalH + 2);
+  y = checkY(y, totalH + 2);
 
   // Light wash background using tier's bg color
   doc.setFillColor(...tierBgRgb);
@@ -474,7 +483,7 @@ function renderInspectionGallery(doc, y, checkY, inspection, kindKey, photoDataM
   const partyLabel = PARTY_LABEL[kindKey] || kindKey;
   const sourceColor = inspection.source === 'tenant' ? TENANT_RGB : LANDLORD_RGB;
 
-  checkY(14);
+  y = checkY(y, 14);
   doc.setFillColor(...sourceColor);
   doc.rect(MARGIN, y, 1.5, 8, 'F');
   doc.setTextColor(28, 25, 23);
@@ -502,7 +511,7 @@ function renderInspectionGallery(doc, y, checkY, inspection, kindKey, photoDataM
 
   for (const p of photos) {
     if (col === 0) {
-      checkY(PHOTO_MAX_H + PHOTO_CAPTION_H + 4);
+      y = checkY(y, PHOTO_MAX_H + PHOTO_CAPTION_H + 4);
       rowStartY = y;
       rowMaxH = 0;
     }
@@ -591,9 +600,17 @@ function buildCaption(photo) {
 
 function formatDateForCaption(ts) {
   if (!ts) return '';
-  if (/^\d{4}-\d{2}-\d{2}T/.test(ts)) {
-    const d = new Date(ts);
+  // Strategy: try Date.parse first (handles ISO format and "May 6, 09:16 PM"
+  // display format). If valid, format as "May 6". If parsing fails, the
+  // timestamp may be a free-form display string — fall back to taking just
+  // the leading "Mon D" segment (everything before the first comma) so the
+  // caption stays single-line.
+  const parsed = Date.parse(ts);
+  if (!isNaN(parsed)) {
+    const d = new Date(parsed);
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   }
+  const commaIdx = ts.indexOf(',');
+  if (commaIdx > 0) return ts.slice(0, commaIdx);
   return ts;
 }
