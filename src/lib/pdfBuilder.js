@@ -1,27 +1,28 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // pdfBuilder.js — generate a printable inspection report PDF
+// v0.4 — Variant C photo grid, emoji-stripped, footer URL, last-page cert
 // ═══════════════════════════════════════════════════════════════════════════
-// Ported from tenant `mainnewest.jsx` buildPDFDoc with two structural changes:
+// Single-inspection report (one phase only — the inspection's defaultSlot)
+// rather than the tenant's combined move-in + move-out doc. Landlord
+// inspections are typically focused on one phase at a time (a baseline,
+// a post-tenant, etc.) so the report renders that one phase.
 //
-//   1. Generates a SINGLE-INSPECTION report (one phase only — the inspection's
-//      defaultSlot) rather than the tenant's combined move-in + move-out doc.
-//      Landlord inspections are typically focused on one phase at a time
-//      (a baseline, a post-tenant, etc.) so the report renders that one phase.
-//
-//   2. Cover page includes tenancy context (tenant names, lease span, rent,
-//      deposit) alongside the property metadata, since landlord reports are
-//      typically attached to a specific tenancy's records.
+// Cover page includes tenancy context (tenant names, lease span, rent,
+// deposit) alongside the property metadata, since landlord reports are
+// typically attached to a specific tenancy's records.
 //
 // Public API:
 //   buildInspectionPDF(inspection, property, tenancy, photoStore) → Promise<jsPDF>
 //
-// Usage in PropertyScreen:
-//   const doc = await buildInspectionPDF(insp, property, tenancy, photoStore);
-//   doc.save(`${property.name}-${insp.label}.pdf`);
+// PHOTO LAYOUT (Variant C, agreed v0.4):
+//   - Page document margin: 18mm
+//   - Photo gallery local margin: 14mm
+//   - 4-up grid, 2mm gap, ~47mm cells, 64mm max height
+//   - Letterbox-fit: aspect always preserved
+//   - Caption: single line (date · GPS or just date)
 //
-// On native, save via Filesystem.writeFile + Share.share (same pattern as
-// tenant). buildInspectionPDF returns a jsPDF instance — the caller decides
-// the output method.
+// EMOJI / FOOTER / CERT:
+//   See comparisonPDF.js — same v0.4 conventions.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { jsPDF } from 'jspdf';
@@ -37,7 +38,18 @@ const PAGE_W = 215.9;
 const PAGE_H = 279.4;
 const MARGIN = 18;
 const COL_W = PAGE_W - MARGIN * 2;
-const FOOTER_LIMIT = 272;   // leave room for footer
+const FOOTER_LIMIT = 268;   // leave 11mm for footer
+
+// Photo gallery local margin (Variant C)
+const PHOTO_MARGIN = 14;
+const PHOTO_COL_W = PAGE_W - PHOTO_MARGIN * 2;
+const PHOTO_COLS = 4;
+const PHOTO_GAP = 2;
+const PHOTO_CELL_W = (PHOTO_COL_W - PHOTO_GAP * (PHOTO_COLS - 1)) / PHOTO_COLS;
+const PHOTO_MAX_H = 64;
+const PHOTO_CAPTION_H = 5;
+
+const SITE_URL = 'moveoutshield.app';
 
 // Forest green RGB matching THEME.brand
 const BRAND_RGB = [27, 58, 45];      // #1B3A2D
@@ -93,7 +105,8 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
   doc.setFontSize(20); doc.setFont('helvetica', 'bold');
   doc.text('MoveOut Shield Landlord', MARGIN, 13);
   doc.setFontSize(10); doc.setFont('helvetica', 'normal');
-  doc.text(`${typeEntry?.label || 'Inspection'} — ${phaseLabel}`, MARGIN, 21);
+  // Hyphen for em-dash compatibility (jsPDF helvetica)
+  doc.text(`${typeEntry?.label || 'Inspection'} - ${phaseLabel}`, MARGIN, 21);
   doc.text(property?.address || '', MARGIN, 27);
   const reportDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
   doc.text(reportDate, PAGE_W - MARGIN, 21, { align: 'right' });
@@ -117,7 +130,7 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
     const moneyLine = [
       tenancy.rent != null ? `Rent $${tenancy.rent}/mo` : null,
       tenancy.deposit != null ? `Deposit $${tenancy.deposit}` : null,
-    ].filter(Boolean).join(' · ');
+    ].filter(Boolean).join(' \u00B7 ');
     if (moneyLine) doc.text(moneyLine, PAGE_W - MARGIN - 4, y + 17, { align: 'right' });
     y += 28;
   }
@@ -159,7 +172,7 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
   }
 
   const boxes = [
-    { label: 'Items\nRated', value: `${totalRated}/${totalPossible || '—'}`, bg: [209, 250, 229], fg: [6, 95, 70] },
+    { label: 'Items\nRated', value: `${totalRated}/${totalPossible || '-'}`, bg: [209, 250, 229], fg: [6, 95, 70] },
     { label: 'Photos\nCaptured', value: String(totalPhotos), bg: [254, 249, 195], fg: [146, 64, 14] },
     { label: 'Damaged\nItems', value: String(damagedCount),
       bg: damagedCount > 0 ? [254, 226, 226] : [209, 250, 229],
@@ -193,7 +206,7 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
     // Skip rooms with no engagement
     if (!statusKeys.length && !hasNotes && !hasPhotos) continue;
 
-    // Room header band
+    // Room header band — emoji-stripped (rm.name only)
     checkY(20);
     doc.setFillColor(...BRAND2_RGB);
     doc.roundedRect(MARGIN, y, COL_W, 10, 2, 2, 'F');
@@ -237,65 +250,124 @@ export async function buildInspectionPDF(inspection, property, tenancy, photoSto
       y += nl.length * 4.5 + 2;
     }
 
-    // Photos
+    // Photos (Variant C 4-up letterbox grid)
     if (hasPhotos) {
       checkY(10);
       doc.setTextColor(...BRAND_RGB); doc.setFontSize(8); doc.setFont('helvetica', 'bold');
       doc.text(`${phaseData.photos.length} photo(s)`, MARGIN + 2, y);
       y += 6;
 
-      const tW = 34, perRow = 3, maxTH = 46, captionH = 14;
-      let tx = MARGIN + 2;
-      let rowMaxH = 0;
-      phaseData.photos.forEach((p, pi) => {
-        const tH = Math.min(Math.round(tW * (p.ratio || 0.75)), maxTH);
-        if (pi > 0 && pi % perRow === 0) {
-          y += rowMaxH + captionH;
-          tx = MARGIN + 2;
-          rowMaxH = 0;
-        }
-        checkY(tH + captionH);
-        rowMaxH = Math.max(rowMaxH, tH);
-
-        try {
-          const imgData = photoDataMap.get(p.path || p.url || '');
-          if (imgData) doc.addImage(imgData, 'JPEG', tx, y, tW, tH);
-        } catch {
-          // skip — image data invalid
-        }
-        doc.setTextColor(80, 80, 80); doc.setFontSize(5.5); doc.setFont('helvetica', 'normal');
-        if (p.ts) doc.text(formatDateForCaption(p.ts), tx, y + tH + 3.5, { maxWidth: tW });
-        if (p.lat) doc.text(`GPS: ${p.lat},${p.lng}`, tx, y + tH + 7, { maxWidth: tW });
-        tx += tW + 3;
-      });
-      y += rowMaxH + captionH + 2;
+      y = renderPhotoGrid(doc, y, checkY, phaseData.photos, photoDataMap);
     }
 
     y += 6;
   }
 
-  // ─── Certification footer ────────────────────────────────────────────────
-  if (y + 16 > FOOTER_LIMIT) { doc.addPage(); y = 20; }
-  y += 4;
-  doc.setTextColor(120, 120, 120); doc.setFontSize(7.5); doc.setFont('helvetica', 'italic');
-  const certLine = `I certify this report accurately reflects the condition of the unit at the time of inspection. — ${property?.name || ''}, ${reportDate}`;
-  doc.text(certLine, MARGIN, y, { maxWidth: COL_W });
+  // ─── Certification footer (rendered on last page bottom margin) ─────────
+  const lastPage = doc.internal.getNumberOfPages();
+  doc.setPage(lastPage);
+  doc.setTextColor(120, 120, 120);
+  doc.setFontSize(7.5); doc.setFont('helvetica', 'italic');
+  const certLine = `I certify this report accurately reflects the condition of the unit at the time of inspection. - ${property?.name || ''}, ${reportDate}`;
+  const certLines = doc.splitTextToSize(certLine, COL_W);
+  const certY = PAGE_H - 12 - certLines.length * 3.5;
+  doc.text(certLines, MARGIN, certY);
 
-  // Page numbers
+  // ─── Footer on every page (URL left, page-num right) ────────────────────
   const pageCount = doc.internal.getNumberOfPages();
   for (let pn = 1; pn <= pageCount; pn++) {
     doc.setPage(pn);
-    doc.setTextColor(160, 155, 150); doc.setFontSize(7); doc.setFont('helvetica', 'normal');
+    doc.setTextColor(160, 155, 150);
+    doc.setFontSize(7); doc.setFont('helvetica', 'normal');
+    doc.text(SITE_URL, MARGIN, PAGE_H - 8);
     doc.text(`Page ${pn} of ${pageCount}`, PAGE_W - MARGIN, PAGE_H - 8, { align: 'right' });
   }
 
   return doc;
 }
 
-// ─── Format ISO timestamp into a short caption ──────────────────────────────
+// ─── Variant C photo grid (4-up letterbox) ──────────────────────────────────
+// Shared layout used for per-room photos in this single-inspection report.
+function renderPhotoGrid(doc, y, checkY, photos, photoDataMap) {
+  let col = 0;
+  let rowMaxH = 0;
+  let rowStartY = y;
+
+  for (const p of photos) {
+    if (col === 0) {
+      checkY(PHOTO_MAX_H + PHOTO_CAPTION_H + 4);
+      rowStartY = y;
+      rowMaxH = 0;
+    }
+
+    const cx = PHOTO_MARGIN + col * (PHOTO_CELL_W + PHOTO_GAP);
+    const cy = rowStartY;
+
+    // Letterbox-fit dimensions
+    const ratio = (typeof p.ratio === 'number' && p.ratio > 0) ? p.ratio : 0.75;
+    let drawW, drawH;
+    const naturalH = PHOTO_CELL_W * ratio;
+    if (naturalH <= PHOTO_MAX_H) {
+      drawW = PHOTO_CELL_W;
+      drawH = naturalH;
+    } else {
+      drawH = PHOTO_MAX_H;
+      drawW = drawH / ratio;
+    }
+    const drawX = cx + (PHOTO_CELL_W - drawW) / 2;
+    const drawY = cy + (PHOTO_MAX_H - drawH) / 2;
+    rowMaxH = Math.max(rowMaxH, PHOTO_MAX_H);
+
+    // Cell background
+    doc.setFillColor(248, 245, 240);
+    doc.rect(cx, cy, PHOTO_CELL_W, PHOTO_MAX_H, 'F');
+
+    const imgData = photoDataMap.get(p.path || p.url || '');
+    if (imgData) {
+      try {
+        doc.addImage(imgData, 'JPEG', drawX, drawY, drawW, drawH);
+      } catch {
+        // image data invalid — placeholder bg already drawn
+      }
+    } else {
+      doc.setTextColor(160, 155, 150);
+      doc.setFontSize(7); doc.setFont('helvetica', 'italic');
+      doc.text('photo unavailable', cx + PHOTO_CELL_W / 2, cy + PHOTO_MAX_H / 2, { align: 'center' });
+    }
+
+    // Single-line caption
+    const captionY = cy + PHOTO_MAX_H + 3;
+    doc.setTextColor(80, 80, 80);
+    doc.setFontSize(7); doc.setFont('helvetica', 'normal');
+    const caption = buildCaption(p);
+    doc.text(caption, cx, captionY, { maxWidth: PHOTO_CELL_W });
+
+    col++;
+    if (col === PHOTO_COLS) {
+      col = 0;
+      y = rowStartY + PHOTO_MAX_H + PHOTO_CAPTION_H + 4;
+    }
+  }
+  if (col !== 0) {
+    y = rowStartY + PHOTO_MAX_H + PHOTO_CAPTION_H + 4;
+  }
+  return y;
+}
+
+// Single-line caption: "May 6 · 39.7,-89.3" or "May 6"
+function buildCaption(photo) {
+  const parts = [];
+  if (photo.ts) parts.push(formatDateForCaption(photo.ts));
+  if (photo.lat && photo.lng) {
+    const lat = typeof photo.lat === 'number' ? photo.lat.toFixed(2) : String(photo.lat).slice(0, 6);
+    const lng = typeof photo.lng === 'number' ? photo.lng.toFixed(2) : String(photo.lng).slice(0, 6);
+    parts.push(`${lat},${lng}`);
+  }
+  return parts.join(' \u00B7 ');
+}
+
 function formatDateForCaption(ts) {
   if (!ts) return '';
-  // Handle both ISO and pre-formatted strings
   if (/^\d{4}-\d{2}-\d{2}T/.test(ts)) {
     const d = new Date(ts);
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
